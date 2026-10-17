@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildReport } from '../lib/report.ts';
 import { buildReportContent } from '../lib/report-content.ts';
-import { applyAction, createEmptyWorkspace } from '../lib/engine.ts';
+import { createEmptyWorkspace } from '../lib/engine.ts';
+import { applyFixtureAction as applyAction } from './helpers/kimi-fixtures.ts';
 const actor = { id: 'report-reviewer', name: 'Synthetic Reviewer', email: 'reviewer@example.invalid' };
 test('report distinguishes current evidence, manual decisions, open issues, and test-only status', () => {
   const state = applyAction(createEmptyWorkspace('reports'), { type: 'seed_demo' }, actor);

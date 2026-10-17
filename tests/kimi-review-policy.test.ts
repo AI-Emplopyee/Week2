@@ -2,8 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { applyAction, createEmptyWorkspace, getIssues } from "../lib/engine.ts";
 import { getDeclarationEntry } from "../lib/declaration.ts";
-import { isShipmentFactClear } from "../lib/shipment-autofill.ts";
-import { extractDocument } from "../lib/extraction.ts";
+import { buildShipmentFacts, isShipmentFactClear } from "../lib/shipment-autofill.ts";
 import type { Action, Actor, AiSourceProposal, WorkspaceState } from "../lib/types.ts";
 
 const actor: Actor = { id: "review-policy", name: "Test reviewer", email: "review@example.invalid" };
@@ -102,6 +101,37 @@ test("two copies of an uncertain original cannot count as independent agreement;
   assert.equal(isShipmentFactClear(state, "grossWeight", [{ ...first, value: "1,000" }, { ...second, value: "1,000" }]), false);
 });
 
+test("matching clear Kimi readings across distinct pages of one original do not need another invoice confirmation", () => {
+  const state = read(addDocument(createEmptyWorkspace("kimi-repeated-pages")), [proposal("invoiceNumber", "INV-REPEATED", { confidence: "medium" })]);
+  const first = state.candidates[0];
+  state.documents[0].pages.push({ ...state.documents[0].pages[0], page: 2, documentType: "packing_list" });
+  state.documents[0].aiProcessedPages!.push(2);
+  const second = { ...first, id: "second-page", page: 2, visualEvidence: { ...first.visualEvidence!, imageSha256: "b".repeat(64) } };
+  state.candidates.push(second);
+  assert.equal(isShipmentFactClear(state, "invoiceNumber", [first, second]), true);
+  assert.equal(buildShipmentFacts(state, state.cases[0]).invoiceNumber.candidates.length, 2, "The invoice-source rule keeps identical corroboration on a packing page.");
+  assert.ok(!getIssues(confirmed(state)).some(issue => issue.id.endsWith(":review-invoiceNumber")));
+  assert.equal(isShipmentFactClear(state, "invoiceNumber", [first, { ...second, visualEvidence: first.visualEvidence }]), false, "Repeating the same page image is not corroboration.");
+  assert.equal(isShipmentFactClear(state, "invoiceNumber", [first, { ...second, page: 1 }]), false, "Two image renders of the same page are not two source pages.");
+  assert.equal(isShipmentFactClear(state, "invoiceNumber", [first, { ...second, value: "INV-DIFFERENT" }]), false);
+  assert.equal(isShipmentFactClear(state, "invoiceNumber", [first, { ...second, readability: "uncertain" }]), false);
+  assert.equal(isShipmentFactClear(state, "invoiceTotal", [{ ...first, field: "invoiceTotal", value: "1,000" }, { ...second, field: "invoiceTotal", value: "1,000" }]), false);
+  const historical = [first, second].map(candidate => ({ ...candidate, method: "browser_local_ocr + contextual_bilingual_label", visualEvidence: undefined }));
+  assert.equal(isShipmentFactClear(state, "invoiceNumber", historical), false, "Legacy OCR is never promoted through Kimi page corroboration.");
+});
+
+test("historical OCR and Kimi-looking candidates without a saved page reading cannot autofill", () => {
+  const state = read(addDocument(createEmptyWorkspace("kimi-current-evidence")), [proposal("invoiceNumber", "INV-CURRENT")]);
+  const candidate = state.candidates[0];
+  candidate.method = "browser_local_ocr";
+  assert.deepEqual(buildShipmentFacts(state, state.cases[0]), {});
+  assert.equal(isShipmentFactClear(state, "invoiceNumber", [candidate]), false);
+  candidate.method = "kimi:test";
+  delete state.documents[0].pages[0].aiReadability;
+  assert.deepEqual(buildShipmentFacts(state, state.cases[0]), {});
+  assert.equal(isShipmentFactClear(state, "invoiceNumber", [candidate]), false);
+});
+
 test("rereading a page replaces old machine guesses and keeps identical human decisions connected", () => {
   let state = confirmed(read(addDocument(createEmptyWorkspace("kimi-reread")), invoice()));
   const source = state.candidates.find(candidate => candidate.field === "grossWeight")!;
@@ -115,6 +145,30 @@ test("rereading a page replaces old machine guesses and keeps identical human de
   assert.equal(changed.cases[0].fields.grossWeight.stale, true);
   assert.deepEqual(changed.candidates.filter(candidate => candidate.field === "grossWeight").map(candidate => candidate.value), ["12"]);
   assert.ok(changed.audit.some(entry => entry.action === "ai_source_evidence_replaced"));
+});
+
+test("model scores persist with visual evidence and score-only rereads preserve the human decision", () => {
+  let state = confirmed(read(addDocument(createEmptyWorkspace("kimi-score-provenance")), [proposal("invoiceNumber", "INV-SCORED", { confidenceScore: 0 })]));
+  const shipment = state.cases[0];
+  const saved = getDeclarationEntry(shipment.declarationDraft, "1.41")!;
+  const source = saved.provenance[0];
+  assert.ok(source.kind === "document");
+  assert.equal(source.confidenceScore, 0);
+  assert.equal(source.candidateId, state.candidates[0].id);
+  assert.ok(!getIssues(state).some(issue => issue.id.endsWith(":review-invoiceNumber")), "An informational score does not change the existing clear-fact policy.");
+  const edit = { type: "save_declaration_field" as const, caseId: shipment.id, fieldId: "1.41", applicability: "applicable" as const, basis: "Checked original invoice.", value: saved.value, provenance: saved.provenance, reason: "Reviewer checked the source.", review: true };
+  assert.throws(() => act(state, { ...edit, provenance: [{ ...source, confidenceScore: 99 }] }), /confidence score/);
+  assert.throws(() => act(state, { ...edit, provenance: [{ ...source, confidenceScore: Infinity }] }));
+  state = act(state, edit);
+  const review = getDeclarationEntry(state.cases[0].declarationDraft, "1.41")!.review;
+  state = read(state, [proposal("invoiceNumber", "INV-SCORED", { confidenceScore: 94.5 })]);
+  const current = getDeclarationEntry(state.cases[0].declarationDraft, "1.41")!;
+  assert.equal(state.candidates.find(candidate => candidate.field === "invoiceNumber")!.confidenceScore, 94.5);
+  assert.equal(current.stale, false);
+  assert.deepEqual(current.review, review);
+  assert.equal(current.provenance[0].kind === "document" && current.provenance[0].confidenceScore, 0, "The original reviewed reading retains its recorded estimate.");
+  assert.ok(!getIssues(state).some(issue => issue.field === "1.41"));
+  assert.doesNotThrow(() => act(state, { ...edit, provenance: current.provenance }), "An existing recorded score remains editable after a score-only reread.");
 });
 
 test("a weak duplicate goods reading does not add confirmation when the same cell is clearly supported", () => {
@@ -135,7 +189,8 @@ test("explicitly clear supplementary pages do not raise obsolete layout or class
     visionEvidence: [{ page: 1, imageSha256: "a".repeat(64), width: 1000, height: 1400 }],
   });
   assert.ok(!getIssues(state).some(issue => issue.id.endsWith("layout-invoice") || issue.id.endsWith("classification-invoice")));
-  assert.ok(getIssues(confirmed(state)).some(issue => issue.id.endsWith("missing-invoice")), "Historical text headings cannot override Kimi's page classification.");
+  assert.equal(state.documents[0].pages[0].documentType, 'other', "Historical text headings cannot override Kimi's page classification.");
+  assert.ok(!getIssues(confirmed(state)).some(issue => /:missing-(invoice|packing|transport)$/.test(issue.id)), "Document labels are not arbitrary completeness requirements.");
 });
 
 test("new document versions wait for Kimi again and retain earlier human decisions as stale", () => {
@@ -211,7 +266,7 @@ test("intake and regrouping cannot recover shipment identifiers through the lega
     id, name: `${id}.txt`, mime: "text/plain", sha256: `different-${id}`, size: source.length,
     extractionPipeline: "kimi", extractionStatus: "pending_ai", pages: [{ page: 1, text: source }], synthetic: true,
   })) });
-  assert.deepEqual(extractDocument(state.documents[0]), { candidates: [], goods: [] });
+  assert.equal(state.documents[0].type, "other");
   assert.equal(state.cases.filter(shipment => !shipment.mergedInto).length, 2);
   assert.equal(state.candidates.length, 0);
   state = act(state, { type: "regroup_existing" });
@@ -234,4 +289,30 @@ test("multi-batch intake retains six-page complete and partial Kimi readings wit
     assert.equal(state.documents[0].aiStatus, count === 6 ? "completed" : "partial");
     assert.equal(state.documents[0].pages[5].aiReadability, count === 6 ? "clear" : undefined);
   }
+});
+
+test("score-only rereads preserve explained arithmetic findings and approval while changed values reopen them", () => {
+  const readings = invoice().map(candidate => ({...candidate,confidenceScore:72,...(candidate.field==='amount'?{value:'150.00',quote:'amount: 150.00'}:{})}));
+  let state=confirmed(read(addDocument(createEmptyWorkspace('kimi-score-resolutions')),readings));
+  const caseId=state.cases[0].id;
+  const arithmetic=getIssues(state).filter(issue=>issue.id.includes(':goods-math-')||issue.id.endsWith(':goods-total'));
+  assert.equal(arithmetic.length,2);
+  for(const issue of arithmetic)state=act(state,{type:'resolve_issue',caseId,issueId:issue.id,reason:'Verified synthetic charge explains this exact difference.'});
+  const decisions=structuredClone(state.cases[0].resolutions);
+  const beforeIssues=getIssues(state).filter(issue=>!issue.resolved).map(issue=>[issue.id,issue.fingerprint]);
+  // Isolate existing approval metadata; this test does not create an approval
+  // or bypass the separate end-to-end shipment approval tests.
+  const approval={actor:actor.name,at:'2026-10-15T12:00:00Z',snapshotId:'existing-immutable-snapshot'};
+  state.cases[0].approval=approval;state.cases[0].status='approved';
+  const same=read(state,readings.map(candidate=>({...candidate,confidenceScore:96.5})));
+  assert.deepEqual(same.cases[0].resolutions,decisions);
+  assert.deepEqual(same.cases[0].approval,approval);
+  assert.equal(same.cases[0].status,'approved');
+  assert.deepEqual(getIssues(same).filter(issue=>!issue.resolved).map(issue=>[issue.id,issue.fingerprint]),beforeIssues);
+  assert.ok(arithmetic.every(issue=>getIssues(same).find(current=>current.id===issue.id)?.resolved));
+  const changed=read(same,readings.map(candidate=>candidate.field==='amount'?{...candidate,value:'175.00',quote:'amount: 175.00'}:candidate));
+  assert.equal(changed.cases[0].approval,undefined);
+  assert.equal(changed.cases[0].status,'review');
+  assert.deepEqual(changed.cases[0].resolutions,decisions,'Previous explanations remain in history but cannot match changed findings.');
+  assert.ok(arithmetic.every(issue=>getIssues(changed).find(current=>current.id===issue.id)?.resolved===false));
 });

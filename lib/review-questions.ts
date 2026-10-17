@@ -1,5 +1,5 @@
 import type { Candidate, Issue, WorkspaceState } from "./types.ts";
-import { isShipmentFactClear, normalizedShipmentValue } from "./shipment-autofill.ts";
+import { buildShipmentFacts, isShipmentFactClear, normalizedShipmentValue } from "./shipment-autofill.ts";
 
 export type ReviewQuestion = {
   kind: "confirm" | "choose" | "missing" | "review";
@@ -25,15 +25,23 @@ export function reviewQuestion(
       candidate.value.trim(),
   );
   const distinctValues = new Map<string, string>();
+  const shipment = issue.field && !issue.goodsLineId && ["conflict", "uncertain", "stale"].includes(issue.kind)
+    ? state.cases.find((item) => item.id === issue.caseId) : undefined;
+  const projected = shipment && issue.field
+    ? new Map((buildShipmentFacts(state, shipment)[issue.field]?.candidates ?? []).map((candidate) => [candidate.id, candidate]))
+    : undefined;
   for (const candidate of candidates) {
-    const key = `${candidate.field}:${normalizedShipmentValue(candidate.field, candidate.value)}`;
+    // The choice summary uses the same evidence-backed formatting comparison as
+    // autofill. Cards retain the original quote and value for source inspection.
+    const comparison = projected?.get(candidate.id) ?? candidate;
+    const key = `${comparison.field}:${normalizedShipmentValue(comparison.field, comparison.value)}`;
     if (!distinctValues.has(key))
-      distinctValues.set(key, candidate.value.trim());
+      distinctValues.set(key, comparison.value.trim());
   }
   // Keep one original display value per semantic value, plus all original evidence.
   const values = [...distinctValues.values()];
   const kind =
-    issue.kind === "missing" && issue.field && values.length === 0
+    (issue.kind === "missing" || (issue.ecusFieldKey && issue.id.endsWith(':required'))) && issue.field && values.length === 0
       ? "missing"
       : issue.field &&
           values.length > 1 &&

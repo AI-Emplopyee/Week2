@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PDFDocument } from 'pdf-lib';
-import { applyAction, createEmptyWorkspace, getIssues } from '../lib/engine.ts';
+import { createEmptyWorkspace, getIssues } from '../lib/engine.ts';
+import { applyFixtureAction as applyAction } from './helpers/kimi-fixtures.ts';
 import { parseIntakeMetadata, sourceCollectionSchema } from '../lib/intake-metadata.ts';
 import { boundedPdfPages } from '../lib/pdf-pages.ts';
 import { acceptedFile, parseMutation } from '../lib/server-validation.ts';
@@ -109,11 +110,12 @@ test('reference-only sources retain originals and provenance but never supply ca
   assert.equal(state.candidates.length, 0);
 });
 
-test('reference-only copies do not satisfy missing commercial documents after a packet is confirmed', () => {
+test('reference-only copies do not satisfy required ECUS information after a packet is confirmed', () => {
   let state = ingest(createEmptyWorkspace('ws_archive_test'), [upload('reference-invoice', { referenceOnly: true })]);
   state = applyAction(state, { type: 'confirm_grouping', caseId: state.cases[0].id, reason: 'Synthetic explicit grouping check.' }, actor);
   const issues = getIssues(state, state.cases[0].id);
-  assert.ok(issues.some(issue => issue.id.endsWith(':missing-invoice') && !issue.resolved));
+  assert.ok(issues.some(issue => issue.ecusFieldKey === 'invoiceTotal' && issue.id.endsWith(':required') && !issue.resolved));
+  assert.ok(!issues.some(issue => /:missing-(invoice|packing|transport)$/.test(issue.id)));
   assert.equal(state.candidates.length, 0);
   assert.equal(state.cases[0].declarationDraft?.fields.length, 0);
 });

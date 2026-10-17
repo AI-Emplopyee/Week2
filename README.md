@@ -25,9 +25,10 @@ Saved records and original files live in **`.aicd-local/state/`**. Keep this dir
 | --- | --- | --- |
 | Documents | One batch intake for PDF/image/text/CSV and saved `.eml`; shared browser file preparation, original files, duplicate detection and evidence-based grouping | Live Gmail synchronization and background processing |
 | Extraction | Kimi-only extraction from page images or structured file text; source-linked header and commercial goods candidates | Broader layout evaluation against broker-reviewed answers |
-| Draft | Shipment-level autofill of supported typed fields after grouping; partial values, source citations, manual edits and review history | Complete verified mapping to the user's ECUS5-VNACCS 2018 build 6.0.248 |
-| Review | Targeted missing/unclear/conflicting questions, source quotations and page previews, confirmation, manual correction and Ask sender | Wider field coverage and broker-calibrated uncertainty thresholds |
-| Messages | Imported `.eml` messages, Kimi matching to shipment evidence, individual uncertain-link review and editable question drafts saved in AICD | Human-approved sending, live Gmail retrieval and timed follow-ups |
+| Draft | ECUS IDA three-form editor from supplied screenshots; source-backed autofill, required-field questions, all 25 goods columns and manual edits | Broader source-layout evaluation against broker-reviewed examples |
+| Review | Guide-based source reconciliation, extraction traces, and targeted questions only for unresolved information | Wider field coverage and broker-calibrated uncertainty thresholds |
+| Client memory | Explicit human corrections to stable importer details; matching-client suggestions with apply, dismiss and stop-suggesting controls | Evaluate additional reusable fields separately from transaction-specific facts |
+| Messages | Imported `.eml` messages, Kimi shipment matching, automatic consolidated question drafts, preserved edits and explicit draft approval | Outgoing delivery, live Gmail retrieval and timed follow-ups |
 | Access | Local single-user mode; retained standalone Supabase password adapter with server authorization | Google sign-in, owner-approved access requests and persistent team sessions |
 | ECUS | Immutable reviewed snapshots and a deterministic **test-only** adapter | Actual connection and credentials collected at connection time |
 | Regulations | Explicitly not assessed | Versioned, verified regulations and code tables when provided |
@@ -39,13 +40,15 @@ Google sign-in, live Gmail OAuth/synchronization, outgoing email delivery, sched
 1. **Read the complete batch.** The browser prepares all selected files, including supported attachments inside saved emails, before submitting one intake request.
 2. **Group before filling.** The backend compares document references and corroborating facts across the batch and existing open shipments. Shared senders, vessels, contracts or master bills alone do not justify a merge. Ambiguous groups stay separate for confirmation.
 3. **Combine evidence.** Repeated totals are compared, never added. Commercial buyers/sellers stay separate from transport agents. A packing page listing one container can support a larger container set.
-4. **Fill the web draft.** Agreed values populate supported declaration components with document/version/page/quote references. Conflicting or unreadable components remain unresolved. Unknown customs, location and tax codes are not invented.
-5. **Resolve real questions.** Confirm source evidence, enter a correction, or use Ask sender to create an editable local message draft. This action never sends email or creates a draft in Gmail.
+4. **Fill the web draft.** Clear Kimi values populate supported declaration components with document/version/page/quote references. The supplied VNACCS guide selects the appropriate source for supported conflicts and maps explicit facts to specified codes. Unresolved conflicts and unreadable values remain questions. Unknown customs, location and tax codes are not invented.
+5. **Prepare remaining questions automatically.** Once all active sources have been read, missing or unresolved form information is collected into one editable local email draft. A known sender is prefilled when unambiguous. The person reviews the recipient and message and approves the draft. This records approval inside AICD; outgoing email delivery is not implemented.
 6. **Preserve decisions when evidence arrives later.** Matching attachments join the existing shipment. Manual decisions remain, changed supporting evidence is flagged, and an approved shipment returns to review when its document set changes. Previous approval snapshots remain intact.
 
-The shipment list and its Documents section show the resulting groups. Review & draft contains the form and questions; Messages contains imported emails and local drafts. Settings contains only Gmail and ECUS connections.
+The shipment list and its Documents section show the resulting groups. Review & draft contains Thông tin chung, Thông tin chung 2, and Danh sách hàng, with questions for missing or unclear information; Messages contains imported emails and local drafts. Settings contains only Gmail and ECUS connections.
 
 **Email matching** connects saved email subjects and body text to current shipment references, including replies with no attachments. When Kimi is configured, intake attempts matching after originals are saved; the shipment list's **Match emails with AI** action processes existing messages in bounded batches of up to eight. Exact source quotations and reference checks determine which links can be saved automatically. Uncertain links get individual confirm/reject questions, and later AI runs preserve human decisions. Matching correspondence does not move all attachments together or approve a declaration. [Email matching architecture and limits](docs/email-shipment-grouping.md).
+
+[ECUS IDA form mapping and validation](docs/ecus-ida-forms.md).
 
 ## How PDF extraction works today
 
@@ -55,7 +58,7 @@ Saved-email intake uses PostalMime in the browser to identify attachments and se
 
 The provider is fixed to Moonshot International with server-only `MOONSHOT_API_KEY`, default model `kimi-k2.6`, and an optional administrator `MOONSHOT_MODEL` override. End users cannot configure the provider or enter an API key. Each visual result retains its document version, page, quotation and image region. The application compares the combined shipment evidence before filling the draft. Clear, supported values without conflicts do not create a routine confirmation question; missing, unclear, contradictory or stale evidence still needs attention. No AI result approves or submits the declaration. [Extraction architecture and administrator setup](docs/kimi-vision.md).
 
-Without the server key, originals are saved and wait for Kimi; there is no local OCR or heuristic-extraction fallback. Keep the browser open during extraction. Successful batches are saved, and the document extraction action can resume unfinished pages after interruption or a rate limit. Provider calls are not blindly retried. Historical extracted records and human decisions remain preserved; installing this update does not silently rerun every sample or claim those older records were read by Kimi. Live model accuracy has not been measured without an API key.
+Without the server key, originals are saved and wait for Kimi; there is no local OCR or heuristic-extraction fallback. Keep the browser open during extraction. Successful batches are saved, and the document extraction action can resume unfinished pages after interruption or a rate limit. Provider calls are not blindly retried. Historical extracted records and human decisions remain preserved, but legacy OCR and parser candidates are excluded from autofill. Opening an import shipment resumes its unread originals when Kimi is configured; this does not reprocess the entire workspace. Documents → How this was extracted shows the reader, page readings, exact source quotes and form destinations. Failed requests require a deliberate retry or reload. A live synthetic extraction test covered all editable ECUS goods columns; broader supplier-layout accuracy remains unmeasured.
 
 Current intake limits are 20 top-level files, 20 MiB per file, 50 pages per file and 50 attachments per saved email. The whole multipart request is capped at 22 MiB including metadata. Each Kimi call allows up to 5 pages / 24,000 text characters; each page image is limited to 2,600 pixels per side and 1.5 MiB. The workspace permits 6 provider calls per minute. Long documents can require several processing attempts. These limits are in code, not customer settings.
 
@@ -66,7 +69,7 @@ app/                         Routes, layout and workspace orchestration
   api/                       Thin HTTP endpoints
 components/
   workspace/                 Navigation, shipment list and shipment sections
-  declaration-draft.tsx      Structured declaration editor
+  declaration-draft.tsx      ECUS IDA three-form editor
   account-access.tsx         Current login/session screens
   kimi-review.tsx            Current document-level Kimi action
 hooks/                       Workspace request/session state
@@ -77,10 +80,14 @@ lib/
   email-grouping.ts           Current correspondence links and individual review decisions
   server-email-grouping.ts    Authorized matching requests and guarded persistence
   shipment-autofill.ts        Combined evidence → typed declaration components
+  client-memory.ts            Local human corrections and guarded matching-client suggestions
   review-questions.ts         Targeted review questions from current issues
   shipment-correspondence.ts  Local editable email drafts; no send operation
-  extraction.ts              Shared field normalization and legacy-record support
+  extraction.ts              Shared normalization and source-type metadata helpers
+  vnaccs-guide-rules.ts       Supplied-guide source selection and explicit code mappings
+  client-case-automation.ts   Resume the selected shipment’s unread originals
   declaration*.ts            Typed declaration schema, validation and drafts
+  ecus-form.ts               Screenshot field mapping and required controls
   client-*.ts                Browser intake, image preparation and edit helpers
   server*.ts                 Request authorization, persistence and file handling
   auth-*.ts                  Identity/session and membership controls

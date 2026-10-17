@@ -1,20 +1,37 @@
 "use client";
 
 import { useLocale } from "@/lib/i18n";
-import { currentEmailCaseId, emailLinkedToCase, isEmailMatchCurrent } from "@/lib/email-grouping";
+import {
+  currentEmailCaseId,
+  emailLinkedToCase,
+  isEmailMatchCurrent,
+} from "@/lib/email-grouping";
 import type { Action, ShipmentCase, WorkspaceState } from "@/lib/types";
-import { ArrowDownToLine, FileText, Mail, Save, Upload } from "lucide-react";
+import {
+  ArrowDownToLine,
+  Check,
+  FileText,
+  Mail,
+  Save,
+  Sparkles,
+  Upload,
+} from "lucide-react";
 import { useState } from "react";
 import { Badge, Empty, documentLabel } from "./shared";
 import { EmailMatchEvidence } from "./email-shipment-matches";
 
-export type EmailDraftEdit = { subject: string; body: string };
+export type EmailDraftEdit = {
+  recipient: string;
+  subject: string;
+  body: string;
+};
 type Props = {
   state: WorkspaceState;
   shipment: ShipmentCase;
   disabled: boolean;
   onUpload: () => void;
   onDocument: (documentId: string) => void;
+  onReviewClientMemory: (fieldKey?: string) => void;
   mutation: (action: Action, success?: string) => Promise<boolean>;
   edits: Record<string, EmailDraftEdit>;
   onEdit: (id: string, edit: EmailDraftEdit) => void;
@@ -27,17 +44,21 @@ export function ShipmentMessages({
   disabled,
   onUpload,
   onDocument,
+  onReviewClientMemory,
   mutation,
   edits,
   onEdit,
   onSaved,
 }: Props) {
-  const { t, date } = useLocale();
+  const { t, date, locale } = useLocale();
+  const say = (vi: string, en: string) => (locale === "vi" ? vi : en);
   const [selectedId, setSelectedId] = useState("");
   const documents = state.documents.filter(
     (document) => document.caseId === shipment.id,
   );
-  const messages = state.emails.filter((email) => emailLinkedToCase(state, email, shipment.id));
+  const messages = state.emails.filter((email) =>
+    emailLinkedToCase(state, email, shipment.id),
+  );
   const drafts = (state.emailDrafts || [])
     .filter((draft) => draft.caseId === shipment.id)
     .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -46,6 +67,336 @@ export function ShipmentMessages({
 
   return (
     <section className="shipment-messages">
+      <section
+        className="card email-drafts"
+        aria-label={say(
+          "Email nháp chờ duyệt",
+          "Email drafts awaiting approval",
+        )}
+      >
+        <div className="panel-heading">
+          <h2>
+            <Sparkles size={16} />
+            {say(
+              "Yêu cầu thông tin được chuẩn bị tự động",
+              "Information requests prepared automatically",
+            )}
+          </h2>
+          {drafts.length > 0 && <Badge>{drafts.length}</Badge>}
+        </div>
+        <p className="email-draft-notice">
+          {say(
+            "Sau khi đọc và đối chiếu chứng từ, AICD gom thông tin còn thiếu hoặc mâu thuẫn vào một email nháp. Bạn kiểm tra nội dung, chọn người nhận và phê duyệt; email chưa được gửi.",
+            "After reading and comparing the documents, AICD collects missing or conflicting information into one email draft. Check the wording, choose the recipient and approve it; the email is not sent.",
+          )}
+        </p>
+        {!drafts.length && (
+          <div className="email-draft-empty">
+            <Check size={20} />
+            <div>
+              <strong>
+                {say(
+                  "Chưa có yêu cầu thông tin cần duyệt",
+                  "No information request awaiting approval",
+                )}
+              </strong>
+              <p>
+                {say(
+                  "Thông tin rõ ràng được tự điền. Email nháp sẽ xuất hiện khi đã đọc đủ chứng từ và vẫn còn thông tin cần hỏi người gửi.",
+                  "Clear information is filled automatically. A draft appears after all source documents have been read if information is still needed from the sender.",
+                )}
+              </p>
+            </div>
+          </div>
+        )}
+        {drafts.map((draft) => {
+          const value = edits[draft.id] || draft;
+          const changed =
+            value.recipient !== draft.recipient ||
+            value.subject !== draft.subject ||
+            value.body !== draft.body;
+          const automation = draft.automation;
+          const needsReview = automation?.state === "needs_review";
+          const waiting = automation?.state === "waiting_for_sources";
+          const resolved = automation?.state === "resolved";
+          const hasUpdate = automation?.pendingBody !== undefined;
+          const pendingMemory = !!automation?.pendingClientMemoryIds?.length;
+          const validRecipient = /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(
+            value.recipient.trim(),
+          );
+          const canApprove =
+            !disabled &&
+            !changed &&
+            !waiting &&
+            !resolved &&
+            !needsReview &&
+            !hasUpdate &&
+            !pendingMemory &&
+            validRecipient &&
+            !!value.subject.trim() &&
+            !!value.body.trim() &&
+            !draft.approval;
+          const update = (change: Partial<EmailDraftEdit>) =>
+            onEdit(draft.id, {
+              recipient: value.recipient,
+              subject: value.subject,
+              body: value.body,
+              ...change,
+            });
+          const save = async () => {
+            const submitted = {
+              recipient: value.recipient,
+              subject: value.subject,
+              body: value.body,
+            };
+            if (
+              await mutation(
+                { type: "save_email_draft", draftId: draft.id, ...submitted },
+                say(
+                  "Đã lưu email nháp để duyệt. Chưa gửi email.",
+                  "Email draft saved for approval. No email was sent.",
+                ),
+              )
+            )
+              onSaved(draft.id, submitted);
+          };
+          return (
+            <article className="email-draft" key={draft.id}>
+              <div className="email-draft-meta">
+                <span>
+                  {automation ? (
+                    <>
+                      <Sparkles size={13} />
+                      {say(
+                        "Tự soạn từ chứng từ",
+                        "Prepared from the documents",
+                      )}{" "}
+                      · {automation.questionCount}{" "}
+                      {say("thông tin cần làm rõ", "information requests")}
+                    </>
+                  ) : (
+                    <>
+                      <Mail size={13} />
+                      {say("Email nháp", "Email draft")}
+                    </>
+                  )}
+                </span>
+                <Badge
+                  tone={
+                    changed || needsReview || pendingMemory
+                      ? "amber"
+                      : draft.approval
+                        ? "green"
+                        : "neutral"
+                  }
+                >
+                  {changed
+                    ? say("Có thay đổi chưa lưu", "Unsaved changes")
+                    : resolved
+                      ? say("Đã đủ thông tin", "Questions resolved")
+                      : waiting
+                        ? say(
+                            "Đang chờ đọc chứng từ",
+                            "Waiting for source reading",
+                          )
+                        : pendingMemory
+                          ? say(
+                              "Cần kiểm tra thông tin đã nhớ",
+                              "Review prior client corrections",
+                            )
+                          : draft.approval
+                            ? say("Đã duyệt · chưa gửi", "Approved · not sent")
+                            : say("Chờ bạn duyệt", "Awaiting your approval")}
+                </Badge>
+              </div>
+              {waiting && (
+                <p className="email-draft-state">
+                  {say(
+                    "Đang chờ Kimi đọc đủ chứng từ hiện hành. Nội dung này sẽ được đối chiếu lại trước khi có thể duyệt.",
+                    "Waiting for Kimi to finish the current documents. These questions will be checked again before the draft can be approved.",
+                  )}
+                </p>
+              )}
+              {pendingMemory && !resolved && (
+                <div className="email-draft-update ecus-memory-email-notice">
+                  <strong>
+                    {say(
+                      "Có thông tin đã sửa trong hồ sơ trước",
+                      "An earlier correction may answer this request",
+                    )}
+                  </strong>
+                  <p>
+                    {say(
+                      "Kiểm tra thông tin đã nhớ của công ty trong biểu mẫu ECUS trước khi hỏi lại. Dùng gợi ý hoặc bỏ qua cho hồ sơ này rồi duyệt email.",
+                      "Review this company’s prior correction in the ECUS form before asking again. Apply it or dismiss it for this shipment, then approve the email.",
+                    )}
+                  </p>
+                  <button
+                    className="button secondary small"
+                    onClick={() =>
+                      onReviewClientMemory(
+                        state.clientMemories?.find(
+                          (memory) =>
+                            memory.id ===
+                            automation?.pendingClientMemoryIds?.[0],
+                        )?.fieldKey,
+                      )
+                    }
+                  >
+                    {say(
+                      "Kiểm tra trong biểu mẫu ECUS",
+                      "Review in the ECUS form",
+                    )}
+                  </button>
+                </div>
+              )}
+              {resolved && (
+                <p className="email-draft-state resolved">
+                  <Check size={14} />
+                  {say(
+                    "Các câu hỏi đã được giải quyết. Bản nháp được giữ để tham khảo và không còn chờ duyệt.",
+                    "The questions have been resolved. This draft is retained for reference and no longer awaits approval.",
+                  )}
+                </p>
+              )}
+              {hasUpdate && (
+                <div className="email-draft-update">
+                  <strong>
+                    {say(
+                      "Có thông tin mới cần đối chiếu",
+                      "Updated questions are available",
+                    )}
+                  </strong>
+                  <p>
+                    {say(
+                      "Chứng từ hoặc câu hỏi đã thay đổi. Nội dung bạn chỉnh sửa được giữ nguyên; đối chiếu đề xuất mới rồi chọn nội dung muốn giữ.",
+                      "The documents or questions have changed. Your edits are preserved; compare the updated proposal and choose the wording to keep.",
+                    )}
+                  </p>
+                  <details>
+                    <summary>
+                      {say("Xem đề xuất mới", "View updated proposal")}
+                    </summary>
+                    <strong>{automation.pendingSubject}</strong>
+                    <pre>{automation.pendingBody}</pre>
+                  </details>
+                  <button
+                    className="button secondary small"
+                    disabled={disabled}
+                    onClick={() =>
+                      update({
+                        subject: automation.pendingSubject || value.subject,
+                        body: automation.pendingBody || value.body,
+                      })
+                    }
+                  >
+                    {say("Dùng đề xuất mới", "Use updated proposal")}
+                  </button>
+                </div>
+              )}
+              <label htmlFor={`email-recipient-${draft.id}`}>
+                {t("Người nhận")}
+              </label>
+              <input
+                id={`email-recipient-${draft.id}`}
+                type="email"
+                value={value.recipient}
+                disabled={disabled}
+                placeholder={say(
+                  "Nhập email người nhận",
+                  "Recipient email address",
+                )}
+                onChange={(event) => update({ recipient: event.target.value })}
+              />
+              {!value.recipient && (
+                <p className="muted">
+                  {say(
+                    "Chưa xác định được một người gửi duy nhất. Chọn email người nhận trước khi duyệt.",
+                    "A single sender could not be determined. Choose the recipient before approving.",
+                  )}
+                </p>
+              )}
+              <label htmlFor={`email-subject-${draft.id}`}>
+                {t("Tiêu đề")}
+              </label>
+              <input
+                id={`email-subject-${draft.id}`}
+                value={value.subject}
+                disabled={disabled}
+                onChange={(event) => update({ subject: event.target.value })}
+              />
+              <label htmlFor={`email-body-${draft.id}`}>
+                {t("Nội dung câu hỏi")}
+              </label>
+              <textarea
+                id={`email-body-${draft.id}`}
+                value={value.body}
+                rows={10}
+                disabled={disabled}
+                onChange={(event) => update({ body: event.target.value })}
+              />
+              {draft.approval && !changed && (
+                <p className="email-draft-approval">
+                  <Check size={14} />
+                  {say("Đã được duyệt bởi", "Approved by")}{" "}
+                  {draft.approval.actorName} · {date(draft.approval.at)}
+                </p>
+              )}
+              <div className="email-draft-footer">
+                <small>
+                  {date(draft.updatedAt)}
+                  {changed && (
+                    <span>
+                      {say(
+                        "Lưu chỉnh sửa trước khi duyệt.",
+                        "Save edits before approving.",
+                      )}
+                    </span>
+                  )}
+                </small>
+                <div>
+                  <button
+                    className="button secondary small"
+                    disabled={
+                      disabled ||
+                      (!changed && !needsReview) ||
+                      !value.subject.trim() ||
+                      !value.body.trim() ||
+                      (!!value.recipient.trim() && !validRecipient)
+                    }
+                    onClick={() => void save()}
+                  >
+                    <Save size={14} />
+                    {needsReview && !changed
+                      ? say("Giữ nội dung này", "Keep this wording")
+                      : t("Lưu email nháp")}
+                  </button>
+                  {!resolved && (
+                    <button
+                      className="button primary small"
+                      disabled={!canApprove}
+                      onClick={() =>
+                        void mutation(
+                          { type: "approve_email_draft", draftId: draft.id },
+                          say(
+                            "Đã duyệt email nháp. Email chưa được gửi.",
+                            "Email draft approved. No email was sent.",
+                          ),
+                        )
+                      }
+                    >
+                      <Check size={14} />
+                      {draft.approval && !changed
+                        ? say("Đã duyệt", "Approved")
+                        : say("Duyệt email nháp", "Approve email draft")}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </article>
+          );
+        })}
+      </section>
       <div className="email-notice">
         <Mail size={23} />
         <div>
@@ -68,110 +419,6 @@ export function ShipmentMessages({
           {t("Nhập email .eml")}
         </button>
       </div>
-      {drafts.length > 0 && (
-        <section
-          className="card email-drafts"
-          aria-label={t("Email nháp hỏi người gửi")}
-        >
-          <div className="panel-heading">
-            <h2>{t("Email nháp hỏi người gửi")}</h2>
-            <Badge>{drafts.length}</Badge>
-          </div>
-          <p className="email-draft-notice">
-            {t(
-              "Kiểm tra và chỉnh sửa câu hỏi trước khi gửi. Bản nháp chỉ lưu trên AICD; chưa gửi email.",
-            )}
-          </p>
-          {drafts.map((draft) => {
-            const value = edits[draft.id] || draft;
-            const changed =
-              value.subject !== draft.subject || value.body !== draft.body;
-            return (
-              <article className="email-draft" key={draft.id}>
-                <div className="email-draft-meta">
-                  <span>
-                    {t("Người nhận")}:{" "}
-                    <strong>
-                      {draft.recipient || t("Chưa có email người gửi")}
-                    </strong>
-                  </span>
-                  <Badge tone={changed ? "amber" : "neutral"}>
-                    {t(changed ? "Có thay đổi chưa lưu" : "Bản nháp đã lưu")}
-                  </Badge>
-                </div>
-                {!draft.recipient && (
-                  <p className="muted">
-                    {t(
-                      "Tệp tải lên không có địa chỉ người gửi. Chưa xác định người nhận email.",
-                    )}
-                  </p>
-                )}
-                <label htmlFor={`email-subject-${draft.id}`}>
-                  {t("Tiêu đề")}
-                </label>
-                <input
-                  id={`email-subject-${draft.id}`}
-                  value={value.subject}
-                  disabled={disabled}
-                  onChange={(event) =>
-                    onEdit(draft.id, {
-                      subject: event.target.value,
-                      body: value.body,
-                    })
-                  }
-                />
-                <label htmlFor={`email-body-${draft.id}`}>
-                  {t("Nội dung câu hỏi")}
-                </label>
-                <textarea
-                  id={`email-body-${draft.id}`}
-                  value={value.body}
-                  rows={9}
-                  disabled={disabled}
-                  onChange={(event) =>
-                    onEdit(draft.id, {
-                      subject: value.subject,
-                      body: event.target.value,
-                    })
-                  }
-                />
-                <div className="email-draft-footer">
-                  <small>{date(draft.updatedAt)}</small>
-                  <button
-                    className="button primary small"
-                    disabled={
-                      disabled ||
-                      !changed ||
-                      !value.subject.trim() ||
-                      !value.body.trim()
-                    }
-                    onClick={async () => {
-                      const submitted = {
-                        subject: value.subject,
-                        body: value.body,
-                      };
-                      if (
-                        await mutation(
-                          {
-                            type: "save_email_draft",
-                            draftId: draft.id,
-                            ...submitted,
-                          },
-                          t("Đã lưu email nháp. Chưa gửi email."),
-                        )
-                      )
-                        onSaved(draft.id, submitted);
-                    }}
-                  >
-                    <Save size={14} />
-                    {t("Lưu email nháp")}
-                  </button>
-                </div>
-              </article>
-            );
-          })}
-        </section>
-      )}
       <div className="card email-layout">
         <div className="email-list">
           <div className="panel-heading">
@@ -218,8 +465,19 @@ export function ShipmentMessages({
                 <dd>{selected.originalName}</dd>
               </dl>
               {(selected.shipmentMatches || [])
-                .filter(match => currentEmailCaseId(state, match.caseId) === shipment.id && match.status === "matched" && isEmailMatchCurrent(state, match))
-                .map(match => <EmailMatchEvidence key={match.id} state={state} match={match} />)}
+                .filter(
+                  (match) =>
+                    currentEmailCaseId(state, match.caseId) === shipment.id &&
+                    match.status === "matched" &&
+                    isEmailMatchCurrent(state, match),
+                )
+                .map((match) => (
+                  <EmailMatchEvidence
+                    key={match.id}
+                    state={state}
+                    match={match}
+                  />
+                ))}
               <a
                 className="button secondary"
                 href={`/api/emails/${selected.id}`}
@@ -236,7 +494,9 @@ export function ShipmentMessages({
                 </>
               ) : (
                 <p className="muted">
-                  {t("Chưa có văn bản email để hiển thị. Tải email gốc để xem nội dung.")}
+                  {t(
+                    "Chưa có văn bản email để hiển thị. Tải email gốc để xem nội dung.",
+                  )}
                 </p>
               )}
               <h3>{t("Tệp đính kèm của lô hàng")}</h3>

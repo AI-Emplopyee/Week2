@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SHIPMENT_TEXT_LIMITS } from './source-text-limits.ts';
 import type { Action, SourcePage } from './types';
 import { declarationActionSchema, declarationRemoveActionSchema } from './declaration.ts';
 
@@ -9,7 +10,7 @@ export const MAX_JSON_BYTES = 1024 * 1024;
 export const MAX_WORKSPACE_BYTES = 32 * 1024 * 1024;
 const id = z.string().min(1).max(160).regex(/^[a-zA-Z0-9_-]+$/);
 const evidenceId = z.string().min(1).max(300).regex(/^[a-zA-Z0-9_:-]+$/);
-const text = z.string().max(10_000);
+const text = z.string().max(SHIPMENT_TEXT_LIMITS.maxValueLength);
 const reason = z.string().trim().min(1).max(2_000);
 const documentType = z.enum(['invoice', 'packing_list', 'bill_of_lading', 'air_waybill', 'contract', 'certificate_of_origin', 'other']);
 const pageSchema = z.object({
@@ -31,17 +32,22 @@ const caseType = z.enum(['import', 'export', 'reference', 'unknown', 'unsupporte
 const goods = z.object({
   id: evidenceId, description: text, quantity: z.string().max(100), unit: z.string().max(100), unitPrice: z.string().max(100), amount: z.string().max(100),
   hsCode: z.string().max(100), origin: z.string().max(100), dutyRate: z.string().max(100), vatRate: z.string().max(100),
-  sourceDocumentId: id.optional(), sourcePage: z.number().int().min(1).max(50).optional(), originalText: text.optional(),
+  sourceDocumentId: id.optional(), sourcePage: z.number().int().min(1).max(50).optional(), originalText: z.string().max(SHIPMENT_TEXT_LIMITS.maxQuoteLength).optional(),
   reviewed: z.boolean(), manual: z.boolean(), reason: z.string().max(2_000).optional(),
 }).strict();
 export const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('review_email_match'), emailId: id, matchId: id, decision: z.enum(['accept', 'reject']), reason }).strict(),
   z.object({ type: z.literal('refresh_extraction'), caseId: id, reason }).strict(),
+  z.object({ type: z.literal('refresh_case_automation'), caseId: id, locale: z.enum(['vi', 'en']).optional() }).strict(),
   declarationActionSchema,
   declarationRemoveActionSchema,
+  z.object({ type: z.literal('apply_client_memory'), caseId: id, memoryId: id, expectedValue: z.string().max(12000) }).strict(),
+  z.object({ type: z.literal('dismiss_client_memory'), caseId: id, memoryId: id }).strict(),
+  z.object({ type: z.literal('revoke_client_memory'), caseId: id, memoryId: id }).strict(),
   z.object({ type: z.literal('regroup_existing'), caseIds: z.array(id).min(1).max(50).optional() }).strict(),
   z.object({ type: z.literal('draft_questions'), caseId: id, issueIds: z.array(z.string().min(1).max(300)).min(1).max(50), locale: z.enum(['vi', 'en']).optional() }).strict(),
-  z.object({ type: z.literal('save_email_draft'), draftId: id, subject: z.string().trim().min(1).max(500), body: z.string().trim().min(1).max(20000) }).strict(),
+  z.object({ type: z.literal('save_email_draft'), draftId: id, recipient: z.union([z.string().trim().email().max(320), z.literal('')]).optional(), subject: z.string().trim().min(1).max(500), body: z.string().trim().min(1).max(20000) }).strict(),
+  z.object({ type: z.literal('approve_email_draft'), draftId: id }).strict(),
   z.object({ type: z.literal('seed_demo') }).strict(),
   z.object({ type: z.literal('create_case'), title: z.string().trim().min(1).max(200), caseType: caseType.optional() }).strict(),
   z.object({ type: z.literal('review_field'), caseId: id, field: z.string().min(1).max(100), value: text, candidateId: evidenceId.optional(), reason }).strict(),

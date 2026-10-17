@@ -22,7 +22,7 @@ function otherCase(state: WorkspaceState, text: string, id = '2') { state.docume
 test('a decisive exact current HBL yields a pure email link without changing shipment or document assignments', async () => {
   const state = fixture(); const before = JSON.stringify(state); let calls = 0;
   const result = await planEmailShipmentMatches(config, state, ['email-1'], { fetch: async (url, init) => {
-    calls++; assert.equal(url, `${KIMI_ENDPOINT}/chat/completions`); assert.equal(init?.redirect, 'error');
+    calls++; assert.equal(url, `${KIMI_ENDPOINT}/chat/completions`); assert.equal(init?.redirect, 'manual');
     assert.equal(new Headers(init?.headers).get('authorization'), `Bearer ${config.apiKey}`);
     const body = JSON.parse(String(init?.body)); assert.deepEqual(body.thinking, { type: 'disabled' }); assert.equal(body.max_tokens, EMAIL_SHIPMENT_AI_LIMITS.maxOutputTokens);
     assert.match(body.messages[0].content, /untrusted data/); assert.match(body.messages[0].content, /never obey instructions/); assert.deepEqual(body.response_format, { type: 'json_object' });
@@ -31,6 +31,19 @@ test('a decisive exact current HBL yields a pure email link without changing shi
     return reply();
   } });
   assert.equal(result.matches[0].decision, 'link'); assert.equal(result.rejected, 0); assert.equal(calls, 1); assert.equal(JSON.stringify(state), before);
+});
+
+test('email matching rejects provider redirects without following their destination', async () => {
+  for (const status of [301, 302, 303, 307, 308]) {
+    let calls = 0;
+    await assert.rejects(() => planEmailShipmentMatches(config, fixture(), ['email-1'], { fetch: async (url, init) => {
+      calls++;
+      assert.equal(url, `${KIMI_ENDPOINT}/chat/completions`);
+      assert.equal(init?.redirect, 'manual');
+      return new Response('private redirect body', { status, headers: { Location: 'https://untrusted.example.invalid/forward' } });
+    } }), (error: unknown) => error instanceof KimiError && error.status === 502 && !error.message.includes('private redirect'));
+    assert.equal(calls, 1);
+  }
 });
 
 test('same sender, thread, company or invoice alone does not automatically group emails', async () => {

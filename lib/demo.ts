@@ -10,7 +10,7 @@ const FIXTURE_SHA256: Record<string, string> = {
 };
 
 function document(id: string, name: string, text: string): UploadedDocument {
-  return { id: `demo-${id}`, name, mime: 'text/plain', size: new TextEncoder().encode(text).length, sha256: FIXTURE_SHA256[id], pages: [{ page: 1, text }], extractionStatus: 'extracted', synthetic: true };
+  return { id: `demo-${id}`, name, mime: 'text/plain', size: new TextEncoder().encode(text).length, sha256: FIXTURE_SHA256[id], pages: [{ page: 1, text }], extractionPipeline: 'kimi', extractionStatus: 'pending_ai', synthetic: true };
 }
 const heading = 'SYNTHETIC DEMO — FICTIONAL COMPANIES — NOT A REAL CLIENT SHIPMENT\n';
 export function syntheticShipments(): { title: string; documents: UploadedDocument[] }[] {
@@ -25,6 +25,6 @@ export function syntheticShipments(): { title: string; documents: UploadedDocume
       document('ready-packing', 'DEMO-packing-list-022.txt', `${heading}PACKING LIST\nInvoice Number: DEMO-INV-022\nB/L Number: DEMO-BL-022\nImporter: Công ty Sợi Việt Demo\nExporter: North Loom Demo Co\nPackages: 12\nGross Weight: 630\nNet Weight: 600\nDescription | Quantity | Unit\nWoven fabric rolls | 1200 | M`),
       document('ready-bl', 'DEMO-bill-of-lading-022.txt', `${heading}BILL OF LADING\nB/L Number: DEMO-BL-022\nImporter: Công ty Sợi Việt Demo\nExporter: North Loom Demo Co\nVessel: DEMO MERIDIAN\nVoyage: D022\nPort of Loading: Busan\nPort of Discharge: Hai Phong\nContainer: DEMO0000022\nPackages: 12\nGross Weight: 630`),
     ] },
-    { title: 'Bản scan • cần nhập chứng từ', documents: [{ id: 'demo-scan', name: 'DEMO-scanned-invoice.png', mime: 'image/png', size: 0, sha256: 'synthetic-fixture-scan-v1', pages: [], extractionStatus: 'needs_transcription', extractionError: 'Synthetic scan placeholder. No OCR service is connected. Upload a text document or enter a checked transcription.', synthetic: true }] },
+    { title: 'Bản scan • cần bản gốc', documents: [{ id: 'demo-scan', name: 'DEMO-scanned-invoice.png', mime: 'image/png', size: 0, sha256: 'synthetic-fixture-scan-v1', pages: [], extractionPipeline: 'kimi', extractionStatus: 'unsupported', extractionError: 'Synthetic placeholder without image bytes. Supply an original PDF or image for Kimi to read.', synthetic: true }] },
   ];
 }

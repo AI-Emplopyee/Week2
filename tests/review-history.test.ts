@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyAction, createEmptyWorkspace, getIssues } from "../lib/engine.ts";
+import { createEmptyWorkspace, getIssues } from "../lib/engine.ts";
+import { applyFixtureAction as applyAction } from './helpers/kimi-fixtures.ts';
 import { getReviewHistory } from "../lib/review-history.ts";
 import type { Actor, UploadedDocument, WorkspaceState } from "../lib/types.ts";
 
@@ -238,7 +239,7 @@ test("editing one row cannot reopen another row’s explicitly resolved arithmet
   let state = fixture();
   const caseId = state.cases[0].id;
   const goods = structuredClone(state.cases[0].goods);
-  goods[1].amount = "21";
+  goods[1].amount = "22";
   state = applyAction(
     state,
     {

@@ -21,7 +21,7 @@ function fixture(packet = false) {
 }
 function vision(state: WorkspaceState, pages = [1], proposed = proposals) {
   const document = state.documents[0];
-  return act(state, { type: 'add_ai_candidates', caseId: document.caseId, documentId: document.id, documentVersion: document.version, model: 'vision-test-model', pages, proposals: proposed, visionEvidence: pages.map(page => ({ page, imageSha256, width: 800, height: 1200 })) });
+  return act(state, { type: 'add_ai_candidates', caseId: document.caseId, documentId: document.id, documentVersion: document.version, model: 'vision-test-model', pages, pageReadings: pages.map(page => ({ page, documentType: page === 1 ? 'invoice' : 'other', readability: 'clear' })), proposals: proposed, visionEvidence: pages.map(page => ({ page, imageSha256, width: 800, height: 1200 })) });
 }
 function confirm(state: WorkspaceState) {
   return act(state, { type: 'confirm_grouping', caseId: state.documents[0].caseId, reason: 'Checked the original shipment documents.' });
@@ -95,7 +95,7 @@ test('source version changes retire visual provenance and processing progress wi
   assert.equal(isDeclarationSourceCurrent(saved.provenance[0], { caseId, documents: state.documents, candidates: state.candidates, goods: shipment.goods }), false);
 });
 
-test('a conflicting visual interpretation flags a human decision instead of overwriting it', () => {
+test('a changed visual reading retires the prior reading and flags a saved human decision instead of overwriting it', () => {
   let state = confirm(vision(fixture()));
   const caseId = state.documents[0].caseId;
   let shipment = state.cases.find(c => c.id === caseId)!;
@@ -108,7 +108,9 @@ test('a conflicting visual interpretation flags a human decision instead of over
   assert.deepEqual(saved.value, entry.value);
   assert.ok(saved.review);
   assert.equal(saved.stale, true);
-  assert.ok(getIssues(state, caseId).some(issue => issue.field === 'invoiceNumber' && issue.kind === 'conflict'));
+  assert.deepEqual(state.candidates.filter(candidate => candidate.field === 'invoiceNumber').map(candidate => candidate.value), ['VIS-002']);
+  assert.ok(getIssues(state, caseId).some(issue => issue.field === '1.41' && issue.kind === 'declaration' && issue.id.endsWith(':stale:review')));
+  assert.equal(isDeclarationSourceCurrent(saved.provenance[0], { caseId, documents: state.documents, candidates: state.candidates, goods: shipment.goods }), false);
 });
 
 test('vision refresh builds goods within a sample packet without confirming it or moving its documents', () => {
@@ -151,4 +153,25 @@ test('rejected evidence warnings persist across completed batches until affected
   assert.deepEqual(state.documents[0].aiRejectedPages, []);
   assert.equal(state.documents[0].aiError, undefined);
   assert.equal(state.candidates.length, before);
+});
+
+test('multi-page grounding retains valid facts and attributes incomplete source readings only to rejected pages', () => {
+  const clear = proposals.map(proposal => ({ ...proposal, confidence: 'high' as const, readability: 'clear' as const }));
+  let state = confirm(vision(fixture(), [1, 2], [...clear, { ...clear[0], page: 2, field: 'hsCode' }]));
+  const caseId = state.documents[0].caseId;
+  assert.deepEqual(state.documents[0].aiRejectedPages, [2]);
+  assert.equal(state.documents[0].aiStatus, 'completed');
+  assert.deepEqual(getDeclarationEntry(state.cases.find(shipment => shipment.id === caseId)!.declarationDraft, '1.41')?.value, { kind: 'reference', reference: 'VIS-001' });
+  assert.equal(getIssues(state, caseId).some(issue => issue.id.endsWith(':required')), false, 'Rejected source readings must not create premature missing-information questions.');
+  assert.equal(state.emailDrafts?.filter(draft => draft.automation).length ?? 0, 0);
+  const audit = state.audit.findLast(entry => entry.action === 'ai_header_proposals_received');
+  assert.deepEqual((audit?.after as { rejectionDiagnostics: unknown[] }).rejectionDiagnostics, [{ index: 5, page: 2, field: 'hsCode', reasons: ['row_scope_mismatch'] }]);
+
+  state = vision(state, [1], [...clear, clear[0]]);
+  assert.deepEqual(state.documents[0].aiRejectedPages, [2], 'A clean neighbour, including exact duplicate proposals, cannot clear the rejected page.');
+  state = vision(state, [2], []);
+  assert.deepEqual(state.documents[0].aiRejectedPages, []);
+  assert.equal(state.documents[0].aiError, undefined);
+  assert.ok(getIssues(state, caseId).some(issue => issue.id.endsWith(':required')));
+  assert.equal(state.emailDrafts?.filter(draft => draft.automation).length, 1);
 });

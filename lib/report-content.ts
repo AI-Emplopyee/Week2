@@ -140,7 +140,7 @@ export function buildReportContent(state: WorkspaceState, caseId: string, locale
     if (document) text(`${t('Nguồn', 'Source')}: ${document.name} · ${t('trang', 'page')} ${line.sourcePage || 1} · ${line.originalText || ''}`, 8, 'muted');
     const missing = t('chưa nhập', 'not entered');
     text(`HS: ${line.hsCode || missing} · ${t('Xuất xứ khai báo', 'Declared origin')}: ${line.origin || missing} · ${t('Thuế NK', 'Import duty')}: ${line.dutyRate || missing} · VAT: ${line.vatRate || missing}`, 8);
-    text(t('HS, xuất xứ và thuế: quyết định thủ công / chưa xác minh; không tính thuế hoặc ưu đãi FTA.', 'HS codes, origin and taxes are manual / unverified decisions; duties and FTA preferences are not calculated.'), 8, 'amber');
+    text(t('HS, xuất xứ và thuế được ghi từ chứng từ hoặc người rà soát; chưa xác minh, không tự tính thuế hoặc ưu đãi FTA.', 'HS codes, origin and taxes are captured from documents or reviewers; unverified. Duties and FTA preferences are not calculated.'), 8, 'amber');
     if (line.reason) text(`${t('Lý do rà soát', 'Review reason')}: ${line.reason}`, 8); gap();
   });
   section('06   Vấn đề, mâu thuẫn và cách xử lý', '06   Issues, conflicts and resolutions');

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { extractDocument } from '../lib/extraction.ts';
+import { extractDocument } from './helpers/legacy-extraction.ts';
 import type { ShipmentDocument } from '../lib/types.ts';
 
 const document = (text: string): ShipmentDocument => ({ id:'office_doc',caseId:'case_one',name:'invoice.xlsx',type:'invoice',mime:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',size:100,sha256:'synthetic',version:1,active:true,uploadedAt:'2026-01-01',synthetic:true,extractionStatus:'extracted',pages:[{page:1,label:'Invoice',text,textSource:'office'}] });

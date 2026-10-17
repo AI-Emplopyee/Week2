@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyAction, createEmptyWorkspace, getIssues } from "../lib/engine.ts";
+import { createEmptyWorkspace, getIssues } from "../lib/engine.ts";
+import { applyFixtureAction as applyAction } from './helpers/kimi-fixtures.ts';
 import { parseMutation } from "../lib/server-validation.ts";
 import type { Action, Actor, GoodsLine, WorkspaceState } from "../lib/types.ts";
 

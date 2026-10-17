@@ -272,14 +272,14 @@ Email matching adds a different relationship from document grouping. An email wi
 
 New automated document facts come from [lib/kimi.ts](../lib/kimi.ts). It asks the model for a bounded structured response and validates each source-linked proposal. Kimi reads PDF/image content visually and reads supported text-based files from their prepared source text.
 
-[lib/extraction.ts](../lib/extraction.ts) retains shared normalization, document-type helpers and support for historical records and explicit transcription. Existing older records and regression tests still use those routines. New uploads do not run its heuristic field extraction as an alternative to Kimi, and provider failure does not activate it.
+[lib/extraction.ts](../lib/extraction.ts) contains shared normalization and helpers that read saved document-type metadata. The historical heuristic reader exists only in test fixtures. Uploads and explicit transcriptions wait for Kimi; provider failure never activates a local field parser.
 
 | Function or structure | Responsibility |
 | --- | --- |
 | Kimi request and response schemas | Bound the request and define permitted facts and evidence. |
 | Page reading and type metadata | Preserve what Kimi read and distinguish invoice, packing and transport pages. |
 | `normalizeValue` | Apply limited, recorded formatting transformations. |
-| `parseNumber` and integrity helpers | Check unambiguous numbers and arithmetic without inventing values. |
+| Exact-decimal integrity helpers | Check unambiguous numbers and arithmetic without inventing values. |
 | Shipment reconciliation | Compare the same fact across its sources before filling the draft. |
 
 Normalization is deliberately narrower than correction. Removing repeated whitespace or converting `2026/10/10` into `2026-10-10` preserves an unambiguous meaning. `03/04/2026` could mean two different dates, so the normalizer leaves that ambiguity for review. A three-letter currency token can be uppercased without claiming it is a verified legal code.
@@ -512,7 +512,6 @@ This inventory groups repeated framework wrappers and supplied assets while iden
 | `scripts/standalone*.mjs`, `aicd.standalone.example.json` | Optional future Cloudflare deployment configuration and commands. |
 | `scripts/prepare-assets.mjs` | Copies PDFium rendering assets into same-origin public assets after installation. |
 | `scripts/generate-pdf-fixtures.py` | Creates synthetic PDF fixtures. |
-| `scripts/evaluate-extraction.ts` | Evaluates supplied local extraction results against selected expected checks without embedding client facts in source. |
 | `scripts/smoke-api.mjs` | Synthetic end-to-end API workflow checks against a running server. |
 | `scripts/smoke-local-boundary.mjs` | Read-only loopback/origin/forwarding/private-file boundary checks. |
 | `scripts/export-source.py` | Builds a source ZIP, excludes local data/secrets/build outputs, and writes a hash manifest and archive checksum. |

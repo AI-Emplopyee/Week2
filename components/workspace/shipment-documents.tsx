@@ -1,5 +1,6 @@
 "use client";
 import { KimiReviewButton } from "@/components/kimi-review";
+import { assessPageRejections } from '@/lib/source-completeness';
 import { DOCUMENT_LABELS } from "@/lib/engine";
 import { useLocale } from "@/lib/i18n";
 import { translateSystemText } from "@/lib/i18n-core";
@@ -25,6 +26,7 @@ import {
 } from "lucide-react";
 import React from "react";
 import { Empty, activeDocs, documentLabel } from "./shared";
+import { ExtractionTrace } from "./extraction-trace";
 type Props = {
   state: WorkspaceState;
   shipment: ShipmentCase;
@@ -42,7 +44,6 @@ type Props = {
   mutation: (action: Action, success?: string) => Promise<boolean>;
   onUpload: () => void;
   onGroup: () => void;
-  onTranscribe: (text: string) => void;
   onReplace: (id: string) => void;
   onBusyChange: (busy: boolean) => void;
   onApplied: (response: WorkspaceResponse, message: string) => void;
@@ -65,7 +66,6 @@ export function ShipmentDocuments({
   mutation,
   onUpload,
   onGroup,
-  onTranscribe,
   onReplace,
   onBusyChange: setBusy,
   onApplied,
@@ -89,17 +89,36 @@ export function ShipmentDocuments({
   const source = documents.find((d) => d.id === documentId) || documents[0];
   const sourcePage =
     source?.pages.find((p) => p.page === page) || source?.pages[0];
-  const kimiVisualPage = source?.extractionPipeline === "kimi" &&
+  const legacySource =
+    !!source && source.extractionPipeline !== "kimi" && !source.referenceOnly;
+  const kimiVisualPage =
+    source?.extractionPipeline === "kimi" &&
     (source.mime === "application/pdf" || source.mime.startsWith("image/"));
-  const pageQuotes = [...new Set(state.candidates
-    .filter(candidate => candidate.documentId === source?.id && candidate.documentVersion === source.version && candidate.page === sourcePage?.page && candidate.method.startsWith("kimi:"))
-    .map(candidate => candidate.originalText))];
-  const visibleText = kimiVisualPage ? pageQuotes.join("\n\n") : sourcePage?.text;
+  const pageQuotes = [
+    ...new Set(
+      state.candidates
+        .filter(
+          (candidate) =>
+            candidate.documentId === source?.id &&
+            candidate.documentVersion === source.version &&
+            candidate.page === sourcePage?.page &&
+            candidate.method.startsWith("kimi:"),
+        )
+        .map((candidate) => candidate.originalText),
+    ),
+  ];
+  const visibleText = kimiVisualPage
+    ? pageQuotes.join("\n\n")
+    : sourcePage?.text;
   const pageRead = !!sourcePage?.aiReadability;
-  const clearSupplementalPage = sourcePage?.aiReadability === "clear" && sourcePage.documentType === "other";
+  const clearSupplementalPage =
+    sourcePage?.aiReadability === "clear" &&
+    sourcePage.documentType === "other";
   const sourceFormatUnsupported = source?.extractionStatus === "unsupported";
-  const sourceCannotOpen = source?.extractionStatus === "failed" || !!source && !source.pages.length;
+  const sourceCannotOpen =
+    source?.extractionStatus === "failed" || (!!source && !source.pages.length);
   const sourceBlocked = sourceFormatUnsupported || sourceCannotOpen;
+  const blockingRejectedPages = source?.aiRejectedPages?.filter(page => assessPageRejections(state, source, page).blocking) ?? [];
   return (
     <aside className="source-panel">
       <div className="panel-heading">
@@ -119,7 +138,7 @@ export function ShipmentDocuments({
       </div>
       {current.sourceCollection && (
         <div
-          className="source-tools"
+          className="source-collection"
           style={{ display: "block", overflowWrap: "anywhere" }}
         >
           <p className="muted">
@@ -230,12 +249,33 @@ export function ShipmentDocuments({
       </div>
       {source && !source.referenceOnly && !sourceBlocked && (
         <div className="source-ai-tools">
+          {legacySource && (
+            <div className="source-legacy-reading">
+              <strong>
+                {locale === "vi"
+                  ? "Kết quả từ bộ đọc trước đây"
+                  : "Previous extractor results"}
+              </strong>
+              <p>
+                {locale === "vi"
+                  ? "Dữ liệu đang lưu có thể đến từ OCR hoặc trình đọc PDF cũ. Quy trình hiện tại dùng Kimi để đọc lại bản gốc; các giá trị cũ không được gắn nhãn là kết quả Kimi."
+                  : "Saved data may come from an earlier OCR or PDF reader. The current workflow uses Kimi to read the original; earlier values are not labeled as Kimi results."}
+              </p>
+            </div>
+          )}
           <KimiReviewButton
             document={source}
             caseId={current.id}
             revision={state.revision}
             initialPage={page}
             disabled={busy || !editable || hasPendingDrafts}
+            label={
+              legacySource
+                ? locale === "vi"
+                  ? "Đọc bản gốc bằng Kimi"
+                  : "Read original with Kimi"
+                : undefined
+            }
             onBusyChange={setBusy}
             onApplied={(response, message) => {
               onApplied(response, message);
@@ -246,20 +286,41 @@ export function ShipmentDocuments({
           />
           {source.aiStatus && (
             <p className="muted" role="status">
-              {source.aiStatus === "completed"
-                ? t("Kimi đã xử lý toàn bộ trang chứng từ.")
-                : source.aiStatus === "unavailable"
-                  ? t(
-                      "Đang chờ Kimi. Quản trị viên cần cấu hình kết nối để trích xuất dữ liệu.",
-                    )
+              {legacySource || source.aiStatus === "unavailable"
+                ? locale === "vi"
+                  ? "Đang chờ Kimi đọc bản gốc."
+                  : "Waiting for Kimi to read the original."
+                : source.aiStatus === "completed"
+                  ? t("Kimi đã xử lý toàn bộ trang chứng từ.")
                   : source.aiStatus === "partial"
-                    ? t("Kimi đã xử lý {p0}/{p1} trang. Có thể tiếp tục các trang còn lại.", { p0: source.aiProcessedPages?.length || 0, p1: source.pages.length })
+                    ? t(
+                        "Kimi đã xử lý {p0}/{p1} trang. Có thể tiếp tục các trang còn lại.",
+                        {
+                          p0: source.aiProcessedPages?.length || 0,
+                          p1: source.pages.length,
+                        },
+                      )
                     : t(
                         "Kimi chưa hoàn tất. Bản gốc và kết quả các trang đã xử lý vẫn được lưu.",
                       )}
             </p>
           )}
-          {source.aiRejectedPages?.length ? <p className="muted" role="status">{t("Một số đề xuất AI chưa đủ căn cứ trên trang {p0}. Kiểm tra hoặc đọc lại các trang này; giá trị bị loại chưa được lưu.", { p0: source.aiRejectedPages.join(", ") })}</p> : source.aiError && source.aiError !== "AI has not checked every page. Continue the remaining pages." ? <p className="muted" role="status">{translateSystemText(source.aiError, locale)}</p> : null}
+          {source.aiRejectedPages?.length ? (
+            <p className="muted" role="status">
+              {blockingRejectedPages.length ? t(
+                "Một số đề xuất AI chưa đủ căn cứ trên trang {p0}. Kiểm tra hoặc đọc lại các trang này; giá trị bị loại chưa được lưu.",
+                { p0: blockingRejectedPages.join(", ") },
+              ) : locale === 'vi'
+                ? 'Các đề xuất bị loại vẫn được giữ trong nhật ký. Hướng dẫn ưu tiên nguồn rõ ràng khác cho cùng chỉ tiêu; các đề xuất này không chặn việc kiểm tra thông tin còn thiếu.'
+                : 'Rejected readings remain in the audit trail. The guide selects clear evidence from a primary document for the same fields; these readings do not block missing-information checks.'}
+            </p>
+          ) : source.aiError &&
+            source.aiError !==
+              "AI has not checked every page. Continue the remaining pages." ? (
+            <p className="muted" role="status">
+              {translateSystemText(source.aiError, locale)}
+            </p>
+          ) : null}
         </div>
       )}
       {source ? (
@@ -273,7 +334,7 @@ export function ShipmentDocuments({
           )}
           {!!source.sourcePaths?.length && (
             <details
-              className="version-history"
+              className="version-history source-paths"
               style={{ margin: "12px 16px", overflowWrap: "anywhere" }}
             >
               <summary>
@@ -368,6 +429,14 @@ export function ShipmentDocuments({
               </button>
             </span>
           </div>
+          {!source.referenceOnly && (
+            <ExtractionTrace
+              state={state}
+              shipment={current}
+              document={source}
+              page={sourcePage}
+            />
+          )}
           {sourceMode === "original" ? (
             <div className="original-preview">
               {source.mime.startsWith("image/") ? (
@@ -399,13 +468,14 @@ export function ShipmentDocuments({
                 <div className="paper-topline">
                   {kimiVisualPage || sourcePage?.textSource === "kimi"
                     ? t("NỘI DUNG KIMI ĐỌC TỪ CHỨNG TỪ")
-                    : sourcePage?.textSource === "ocr"
-                    ? t("VĂN BẢN ĐÃ LƯU TỪ LẦN NHẬP TRƯỚC")
-                    : sourcePage?.textSource === "office"
-                      ? t("VĂN BẢN TỪ TÀI LIỆU / BẢNG TÍNH")
-                      : sourcePage?.textSource === "xml"
-                        ? t("VĂN BẢN TỪ XML")
-                        : t("VĂN BẢN TỪ CHỨNG TỪ ")}
+                    : sourcePage?.textSource === "ocr" ||
+                        sourcePage?.textSource === "pdf_text"
+                      ? t("VĂN BẢN ĐÃ LƯU TỪ LẦN NHẬP TRƯỚC")
+                      : sourcePage?.textSource === "office"
+                        ? t("VĂN BẢN TỪ TÀI LIỆU / BẢNG TÍNH")
+                        : sourcePage?.textSource === "xml"
+                          ? t("VĂN BẢN TỪ XML")
+                          : t("VĂN BẢN TỪ CHỨNG TỪ ")}
                   <span>
                     {sourcePage?.label ||
                       `${t("TRANG ")}${sourcePage?.page || page}`}
@@ -415,35 +485,81 @@ export function ShipmentDocuments({
                   <pre>{visibleText}</pre>
                 ) : (
                   <div className="source-empty">
-                    {!sourceBlocked && sourcePage?.aiReadability === "clear" ? <Check size={24} /> : <AlertCircle size={24} />}
-                    <strong>{t(sourceFormatUnsupported ? "Cần đổi định dạng chứng từ" : sourceCannotOpen ? "Không mở được trang gốc" : clearSupplementalPage ? "Trang bổ sung đã được đọc" : pageRead ? "Kimi đã đọc trang này" : source.extractionStatus === "pending_ai" ? "Đang chờ Kimi đọc chứng từ" : "Chưa có nội dung đọc được")}</strong>
+                    {!sourceBlocked && sourcePage?.aiReadability === "clear" ? (
+                      <Check size={24} />
+                    ) : (
+                      <AlertCircle size={24} />
+                    )}
+                    <strong>
+                      {t(
+                        sourceFormatUnsupported
+                          ? "Cần đổi định dạng chứng từ"
+                          : sourceCannotOpen
+                            ? "Không mở được trang gốc"
+                            : clearSupplementalPage
+                              ? "Trang bổ sung đã được đọc"
+                              : pageRead
+                                ? "Kimi đã đọc trang này"
+                                : source.extractionStatus === "pending_ai"
+                                  ? "Đang chờ Kimi đọc chứng từ"
+                                  : "Chưa có nội dung đọc được",
+                      )}
+                    </strong>
                     <p>
                       {sourceFormatUnsupported
-                        ? t("Bản gốc đã được lưu. Thay bằng PDF hoặc ảnh được hỗ trợ để Kimi đọc nội dung.")
+                        ? t(
+                            "Bản gốc đã được lưu. Thay bằng PDF hoặc ảnh được hỗ trợ để Kimi đọc nội dung.",
+                          )
                         : sourceCannotOpen
-                          ? t("Bản gốc đã được lưu nhưng chưa mở được trang. Thay bằng PDF không khóa hoặc ảnh đọc được.")
+                          ? t(
+                              "Bản gốc đã được lưu nhưng chưa mở được trang. Thay bằng PDF không khóa hoặc ảnh đọc được.",
+                            )
                           : clearSupplementalPage
-                            ? t("Đây là trang bổ sung, không có trường tờ khai cần trích xuất. Không cần xác nhận trang này.")
-                        : sourcePage?.aiReadability === "clear"
-                          ? t("Trang này không có giá trị thuộc các trường đang hỗ trợ. Bạn có thể xem bản gốc hoặc yêu cầu Kimi đọc lại.")
-                        : source.extractionError
-                          ? translateSystemText(source.extractionError, locale)
-                          : t("Dùng Kimi để đọc trang gốc. Thông tin rõ ràng sẽ tự điền vào bản nháp; bạn vẫn có thể sửa thủ công.")}
+                            ? t(
+                                "Đây là trang bổ sung, không có trường tờ khai cần trích xuất. Không cần xác nhận trang này.",
+                              )
+                            : sourcePage?.aiReadability === "clear"
+                              ? t(
+                                  "Trang này không có giá trị thuộc các trường đang hỗ trợ. Bạn có thể xem bản gốc hoặc yêu cầu Kimi đọc lại.",
+                                )
+                              : source.extractionError
+                                ? translateSystemText(
+                                    source.extractionError,
+                                    locale,
+                                  )
+                                : t(
+                                    "Dùng Kimi để đọc trang gốc. Thông tin rõ ràng sẽ tự điền vào bản nháp; bạn vẫn có thể sửa thủ công.",
+                                  )}
                     </p>
-                    {sourceBlocked
-                      ? <button className="button secondary small" disabled={busy || !editable} onClick={() => onReplace(source.id)}>{t("Thay bản đọc được")}</button>
-                      : clearSupplementalPage
-                        ? <button className="button secondary small" onClick={() => setSourceMode("original")}>{t("Xem bản gốc")}</button>
-                      : !source.referenceOnly && <KimiReviewButton
-                      document={source}
-                      caseId={current.id}
-                      revision={state.revision}
-                      initialPage={page}
-                      disabled={busy || !editable || hasPendingDrafts}
-                      onBusyChange={setBusy}
-                      onApplied={onApplied}
-                      onConflict={onConflict}
-                    />}
+                    {sourceBlocked ? (
+                      <button
+                        className="button secondary small"
+                        disabled={busy || !editable}
+                        onClick={() => onReplace(source.id)}
+                      >
+                        {t("Thay bản đọc được")}
+                      </button>
+                    ) : clearSupplementalPage ? (
+                      <button
+                        className="button secondary small"
+                        onClick={() => setSourceMode("original")}
+                      >
+                        {t("Xem bản gốc")}
+                      </button>
+                    ) : (
+                      !source.referenceOnly && (
+                        <KimiReviewButton
+                          document={source}
+                          caseId={current.id}
+                          revision={state.revision}
+                          initialPage={page}
+                          disabled={busy || !editable || hasPendingDrafts}
+                          onBusyChange={setBusy}
+                          onApplied={onApplied}
+                          onConflict={onConflict}
+                        />
+                      )
+                    )}
                   </div>
                 )}
               </div>
@@ -455,15 +571,6 @@ export function ShipmentDocuments({
               KB {source.synthetic && t("· Giả lập")}
             </span>
             <div>
-              {!sourceBlocked && <button
-                className="text-button"
-                disabled={!editable || busy}
-                onClick={() => {
-                  onTranscribe(sourcePage?.text || "");
-                }}
-              >
-                {t("Chép / sửa văn bản")}
-              </button>}
               <button
                 className="text-button"
                 disabled={!editable || busy}

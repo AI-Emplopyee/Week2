@@ -2,6 +2,10 @@
 import { FIELD_DEFINITIONS } from "@/lib/engine";
 import { useLocale } from "@/lib/i18n";
 import { translateSystemText } from "@/lib/i18n-core";
+import {
+  buildShipmentFacts,
+  isShipmentFactClear,
+} from "@/lib/shipment-autofill";
 import type {
   Candidate,
   Issue,
@@ -45,6 +49,19 @@ export function SourceFields({
 }: Props) {
   const { t, locale } = useLocale();
   const editable = current.status === "review";
+  const facts = buildShipmentFacts(state, current);
+  const isCurrentKimiReading = (candidate: Candidate) =>
+    candidate.method.startsWith("kimi:") &&
+    state.documents.some(
+      (document) =>
+        document.id === candidate.documentId &&
+        document.version === candidate.documentVersion &&
+        document.active &&
+        !document.referenceOnly &&
+        document.pages.some(
+          (page) => page.page === candidate.page && !!page.aiReadability,
+        ),
+    );
   return (
     <div className="field-list">
       {Array.from(new Set(FIELD_DEFINITIONS.map((f) => f.group))).map(
@@ -52,8 +69,12 @@ export function SourceFields({
           <section className="field-group" key={group}>
             <h3>{t(group)}</h3>
             {FIELD_DEFINITIONS.filter((f) => f.group === group).map((field) => {
-              const candidates = currentCandidates.filter(
+              const fieldCandidates = currentCandidates.filter(
                 (c) => c.field === field.key && !c.lineId,
+              );
+              const candidates = fieldCandidates.filter(isCurrentKimiReading);
+              const historicalCandidates = fieldCandidates.filter(
+                (candidate) => !isCurrentKimiReading(candidate),
               );
               const reviewed = current.fields[field.key];
               const related = caseIssues.filter((i) => i.field === field.key);
@@ -61,6 +82,24 @@ export function SourceFields({
                 (c) => c.id === reviewed?.candidateId,
               );
               const candidate = selected || candidates[0];
+              const fact = facts[field.key];
+              const clearFact =
+                !!fact &&
+                isShipmentFactClear(state, field.key, fact.candidates);
+              const automaticallyApplied =
+                clearFact &&
+                !reviewed &&
+                fact.candidates.every((value) =>
+                  value.method.startsWith("kimi:"),
+                ) &&
+                current.declarationDraft?.fields.some(
+                  (entry) =>
+                    entry.generatedBy === "shipment_extraction" &&
+                    !entry.stale &&
+                    entry.sourceCandidateIds?.some((id) =>
+                      fact.candidates.some((value) => value.id === id),
+                    ),
+                );
               const key = `${current.id}:${field.key}`;
               const value =
                 key in drafts
@@ -68,9 +107,11 @@ export function SourceFields({
                   : ((reviewed && !reviewed.stale
                       ? reviewed.value
                       : undefined) ??
-                    (new Set(candidates.map((c) => c.value)).size === 1
-                      ? candidates[0]?.value
-                      : "") ??
+                    (clearFact
+                      ? fact.value
+                      : new Set(candidates.map((c) => c.value)).size === 1
+                        ? candidates[0]?.value
+                        : "") ??
                     "");
               return (
                 <div
@@ -102,25 +143,45 @@ export function SourceFields({
                       }
                       onBlur={() => void saveField(current, field.key)}
                     />
-                    <button
-                      className="icon-button"
-                      disabled={busy || !editable || !value}
-                      aria-label={t("Xác nhận {p0}", { p0: t(field.label) })}
-                      title={
-                        key in drafts
-                          ? t("Lưu nội dung chỉnh sửa")
-                          : t("Xác nhận giá trị từ chứng từ")
-                      }
-                      onClick={() => {
-                        if (key in drafts) void saveField(current, field.key);
-                        else if (candidate)
-                          void acceptCandidate(current, candidate);
-                      }}
-                    >
-                      <Check size={16} />
-                    </button>
+                    {automaticallyApplied && !(key in drafts) ? (
+                      <span
+                        className="field-autofilled"
+                        title={
+                          locale === "vi"
+                            ? "Thông tin rõ ràng đã tự điền; không cần xác nhận riêng từng giá trị."
+                            : "Clear information was autofilled; no separate confirmation is needed."
+                        }
+                      >
+                        <Check size={16} />
+                      </span>
+                    ) : (
+                      <button
+                        className="icon-button"
+                        disabled={busy || !editable || !value}
+                        aria-label={t("Xác nhận {p0}", { p0: t(field.label) })}
+                        title={
+                          key in drafts
+                            ? t("Lưu nội dung chỉnh sửa")
+                            : t("Xác nhận giá trị từ chứng từ")
+                        }
+                        onClick={() => {
+                          if (key in drafts) void saveField(current, field.key);
+                          else if (candidate)
+                            void acceptCandidate(current, candidate);
+                        }}
+                      >
+                        <Check size={16} />
+                      </button>
+                    )}
                   </div>
                   <div className="field-meta">
+                    {automaticallyApplied && (
+                      <span className="field-autofilled-label">
+                        {locale === "vi"
+                          ? "Kimi · Đã tự điền"
+                          : "Kimi · Autofilled"}
+                      </span>
+                    )}
                     {reviewed?.stale ? (
                       <span className="text-amber">
                         {t("Nguồn đã thay đổi · cần rà soát lại")}
@@ -195,6 +256,43 @@ export function SourceFields({
                             <Check size={12} />
                             {t("Sử dụng giá trị này")}
                           </button>
+                        </div>
+                      ))}
+                    </details>
+                  )}
+                  {historicalCandidates.length > 0 && (
+                    <details className="candidate-details historical-readings">
+                      <summary>
+                        {historicalCandidates.length}{" "}
+                        {locale === "vi"
+                          ? "kết quả cũ · không dùng để tự điền"
+                          : "historical readings · excluded from autofill"}
+                      </summary>
+                      <p className="muted">
+                        {locale === "vi"
+                          ? "Chỉ giữ để đối chiếu. Kimi cần đọc bản gốc trước khi các giá trị này có thể được dùng làm đề xuất hiện tại."
+                          : "Retained for reference. Kimi must read the original before these values can become current suggestions."}
+                      </p>
+                      {historicalCandidates.map((candidate) => (
+                        <div className="candidate" key={candidate.id}>
+                          <strong>{candidate.value}</strong>
+                          <button
+                            className="evidence-link"
+                            onClick={() => evidence(candidate)}
+                          >
+                            {
+                              state.documents.find(
+                                (document) =>
+                                  document.id === candidate.documentId,
+                              )?.name
+                            }{" "}
+                            · {t("trang")} {candidate.page}{" "}
+                            <ArrowUpRight size={11} />
+                          </button>
+                          <blockquote>{candidate.originalText}</blockquote>
+                          <small>
+                            {candidate.method} · {candidate.location}
+                          </small>
                         </div>
                       ))}
                     </details>

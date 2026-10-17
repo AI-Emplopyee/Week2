@@ -1,3 +1,4 @@
+import { sourcePageNeedsKimi } from './source-completeness.ts';
 import { fetchWithSession } from './auth-client.ts';
 import { throwIfAborted, withIntakeTimeout } from './client-intake-utils.ts';
 import { MAX_FILE_BYTES } from './client-intake.ts';
@@ -28,7 +29,7 @@ export function canRenderVisionDocument(document: Pick<ShipmentDocument, 'mime' 
   return document.mime === 'application/pdf' || /^image\/(png|jpeg|webp)$/.test(document.mime);
 }
 
-/** Every selected page appears exactly once. An oversized page is reported, never silently dropped. */
+/** Every selected page appears exactly once. Visual pages save independently so a dense page can resume without rereading its neighbours. */
 export function buildAiBatches(pages: readonly SourcePage[], selected: readonly number[], limits: ClientAiStatus['limits'], visual: boolean): number[][] {
   const unique = new Set(selected);
   if (!unique.size) throw new Error('Select at least one page.');
@@ -36,12 +37,13 @@ export function buildAiBatches(pages: readonly SourcePage[], selected: readonly 
   const chosen = pages.filter(page => unique.has(page.page)).sort((a, b) => a.page - b.page);
   if (chosen.length !== unique.size) throw new Error('The selected pages no longer exist. Reload the document.');
   const batches: number[][] = [];
+  const maxPages = visual ? 1 : limits.maxPages;
   let batch: number[] = []; let characters = 0;
   for (const page of chosen) {
     if (!visual && !page.text.trim()) throw new Error(`Page ${page.page} has no readable text. Use a PDF or supported image for vision extraction.`);
     const pageCharacters = visual ? 0 : page.text.length;
     if (pageCharacters > limits.maxTextCharacters) throw new Error(`Page ${page.page} exceeds the extraction text limit. Split this page into a smaller document before processing.`);
-    if (batch.length && (batch.length >= limits.maxPages || characters + pageCharacters > limits.maxTextCharacters)) { batches.push(batch); batch = []; characters = 0; }
+    if (batch.length && (batch.length >= maxPages || characters + pageCharacters > limits.maxTextCharacters)) { batches.push(batch); batch = []; characters = 0; }
     batch.push(page.page); characters += pageCharacters;
   }
   if (batch.length) batches.push(batch);
@@ -124,7 +126,7 @@ export async function runDocumentAi(options: {
   if (!options.status.configured) throw new Error('An administrator must configure Kimi on the server.');
   const visual = canRenderVisionDocument(source);
   if (visual && options.status.visionSupported === false) throw new Error('The configured Kimi model does not support vision. An administrator must select a vision model.');
-  const selected = options.pages ?? source.pages.filter(page => !(source.aiProcessedPages || []).includes(page.page)).map(page => page.page);
+  const selected = options.pages ?? source.pages.filter(page => sourcePageNeedsKimi(workspace.state, source, page)).map(page => page.page);
   if (!selected.length) return { workspace, added: 0, rejected: 0, processed: 0 };
   const batches = buildAiBatches(source.pages, selected, options.status.limits, visual);
   let renderer: VisionRenderer | undefined; let added = 0; let rejected = 0; let processed = 0;

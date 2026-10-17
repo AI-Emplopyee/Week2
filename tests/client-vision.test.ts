@@ -17,19 +17,21 @@ function rasterHarness() {
 test('vision batching includes every page and ignores legacy text while text-only input stays bounded', () => {
   const pages = source(50).pages;
   const batches = buildAiBatches(pages, pages.map(page => page.page), { ...status.limits, maxPages: 5 }, true);
-  assert.equal(batches.length, 10); assert.deepEqual(batches.flat(), pages.map(page => page.page));
+  assert.equal(batches.length, 50); assert.ok(batches.every(batch => batch.length === 1)); assert.deepEqual(batches.flat(), pages.map(page => page.page));
   assert.throws(() => buildAiBatches(pages, [1], status.limits, false), /no readable text/);
   assert.throws(() => buildAiBatches(pages, [1, 1], status.limits, true), /Invalid/);
   assert.throws(() => buildAiBatches(pages, [51], status.limits, true), /no longer exist/);
   assert.throws(() => buildAiBatches([{ page: 1, text: 'x'.repeat(101) }], [1], status.limits, false), /exceeds/);
   assert.deepEqual(buildAiBatches([{ page: 1, text: 'x'.repeat(101) }], [1], status.limits, true), [[1]]);
   assert.deepEqual(buildAiBatches([{ page: 1, text: 'x'.repeat(80), pdfText: 'y'.repeat(21) }], [1], status.limits, true), [[1]]);
-  assert.deepEqual(buildAiBatches([{ page: 1, text: 'x'.repeat(20), pdfText: 'y'.repeat(40) }, { page: 2, text: 'z'.repeat(41) }], [1, 2], status.limits, true), [[1, 2]]);
+  assert.deepEqual(buildAiBatches([{ page: 1, text: 'x'.repeat(20), pdfText: 'y'.repeat(40) }, { page: 2, text: 'z'.repeat(41) }], [1, 2], status.limits, true), [[1], [2]]);
+  assert.deepEqual(buildAiBatches([{ page: 1, text: 'x'.repeat(20) }, { page: 2, text: 'z'.repeat(41) }], [1, 2], status.limits, false), [[1, 2]]);
   assert.deepEqual(buildAiBatches([{ page: 1, text: 'x'.repeat(70) }, { page: 2, text: 'y'.repeat(60) }], [2, 1], status.limits, false), [[1], [2]]);
 });
 
-test('browser pipeline binds image hashes, follows regrouping, and carries the revision after every saved batch', async () => {
-  let current = workspace(); const savedRevisions: number[] = []; const batches: number[][] = []; const rasters = rasterHarness();
+test('browser pipeline rereads legacy coverage, binds image hashes, follows regrouping, and carries each saved revision', async () => {
+  const legacy = source();
+  let current = workspace({ ...legacy, aiStatus: 'completed', aiProcessedPages: legacy.pages.map(page => page.page) }); const savedRevisions: number[] = []; const batches: number[][] = []; const rasters = rasterHarness();
   const result = await runDocumentAi({ workspace: current, documentId: source().id, status, onWorkspace: value => savedRevisions.push(value.state.revision) }, {
     renderer: rasters.renderer,
     fetch: async (url, init) => {
@@ -44,12 +46,12 @@ test('browser pipeline binds image hashes, follows regrouping, and carries the r
       assert.equal(body.revision, current.state.revision); assert.equal(body.caseId, current.state.documents[0].caseId);
       assert.deepEqual(body.visionPages, body.pages.map((page: number) => ({ page, imageSha256: hash(page) }))); assert.equal(body.consent, true);
       assert.equal(body.apiKey, undefined); assert.equal(body.images, undefined); batches.push(body.pages);
-      current = { ...current, state: { ...current.state, revision: current.state.revision + 1, documents: [{ ...current.state.documents[0], caseId: 'case-regrouped', aiProcessedPages: [...(current.state.documents[0].aiProcessedPages || []), ...body.pages] }] } };
+      current = { ...current, state: { ...current.state, revision: current.state.revision + 1, documents: [{ ...current.state.documents[0], caseId: 'case-regrouped', extractionPipeline: 'kimi', pages: current.state.documents[0].pages.map(page => body.pages.includes(page.page) ? { ...page, textSource: 'kimi', aiReadability: 'clear' } : page), aiProcessedPages: [...(current.state.documents[0].aiProcessedPages || []), ...body.pages] }] } };
       return Response.json({ ...current, ai: { added: 1, rejected: 0, pages: body.pages } });
     },
   });
-  assert.deepEqual(batches, [[1, 2], [3, 4], [5, 6], [7]]); assert.deepEqual(rasters.rendered, [1, 2, 3, 4, 5, 6, 7]);
-  assert.deepEqual(savedRevisions, [13, 14, 15, 16]); assert.equal(result.processed, 7); assert.equal(result.added, 4); assert.equal(rasters.closes, 1);
+  assert.deepEqual(batches, [[1], [2], [3], [4], [5], [6], [7]]); assert.deepEqual(rasters.rendered, [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(savedRevisions, [13, 14, 15, 16, 17, 18, 19]); assert.equal(result.processed, 7); assert.equal(result.added, 7); assert.equal(rasters.closes, 1);
 });
 
 test('a rate-limited later batch preserves saved pages, closes the renderer, and resumes only the remainder', async () => {
@@ -57,15 +59,15 @@ test('a rate-limited later batch preserves saved pages, closes the renderer, and
   const request = async (url: string, init?: RequestInit) => {
     if (url === '/api/ai/vision-page') { const page = Number((init?.body as FormData).get('page')); return Response.json({ imageSha256: hash(page) }); }
     extracts++; if (extracts === 2) return Response.json({ error: 'Rate limit reached.' }, { status: 429 });
-    const body = JSON.parse(String(init?.body)); current = { ...current, state: { ...current.state, revision: current.state.revision + 1, documents: [{ ...current.state.documents[0], aiProcessedPages: [...(current.state.documents[0].aiProcessedPages || []), ...body.pages] }] } };
+    const body = JSON.parse(String(init?.body)); current = { ...current, state: { ...current.state, revision: current.state.revision + 1, documents: [{ ...current.state.documents[0], extractionPipeline: 'kimi', pages: current.state.documents[0].pages.map(page => body.pages.includes(page.page) ? { ...page, textSource: 'kimi', aiReadability: 'clear' } : page), aiProcessedPages: [...(current.state.documents[0].aiProcessedPages || []), ...body.pages] }] } };
     return Response.json({ ...current, ai: { added: 0, rejected: 0, pages: body.pages } });
   };
   let lastInstalled: WorkspaceResponse | undefined;
   await assert.rejects(runDocumentAi({ workspace: current, documentId: source().id, status, onWorkspace: response => { lastInstalled = response; } }, { renderer: firstRasters.renderer, fetch: request }), error => error instanceof AiPipelineError && error.status === 429);
-  assert.equal(extracts, 2); assert.equal(firstRasters.closes, 1); assert.deepEqual(lastInstalled?.state.documents[0].aiProcessedPages, [1, 2]);
+  assert.equal(extracts, 2); assert.equal(firstRasters.closes, 1); assert.deepEqual(lastInstalled?.state.documents[0].aiProcessedPages, [1]);
   const secondRasters = rasterHarness();
   const result = await runDocumentAi({ workspace: lastInstalled!, documentId: source().id, status }, { renderer: secondRasters.renderer, fetch: request });
-  assert.deepEqual(secondRasters.rendered, [3, 4]); assert.equal(result.processed, 2); assert.equal(extracts, 3);
+  assert.deepEqual(secondRasters.rendered, [2, 3, 4]); assert.equal(result.processed, 3); assert.equal(extracts, 5);
 });
 
 test('stopping after a committed batch leaves that result installed and sends no next extraction', async () => {
@@ -74,10 +76,23 @@ test('stopping after a committed batch leaves that result installed and sends no
     renderer: rasters.renderer,
     fetch: async (url, init) => {
       if (url === '/api/ai/vision-page') return Response.json({ imageSha256: hash(Number((init?.body as FormData).get('page'))) });
-      extractCalls++; return Response.json({ ...workspace(), ai: { pages: [1, 2] } });
+      extractCalls++; return Response.json({ ...workspace(), ai: { pages: [1] } });
     },
   }), error => error instanceof DOMException && error.name === 'AbortError');
-  assert.equal(extractCalls, 1); assert.equal(rasters.closes, 1); assert.deepEqual(rasters.rendered, [1, 2]);
+  assert.equal(extractCalls, 1); assert.equal(rasters.closes, 1); assert.deepEqual(rasters.rendered, [1]);
+});
+
+test('a new document extraction retries only rejected completed pages once', async () => {
+  const original = source(3);
+  const current = workspace({ ...original, extractionPipeline: 'kimi', extractionStatus: 'extracted', aiProcessedPages: [1, 2, 3], aiRejectedPages: [2], pages: original.pages.map(page => ({ ...page, aiReadability: 'clear' })) });
+  const rasters = rasterHarness(); const requested: number[][] = [];
+  const result = await runDocumentAi({ workspace: current, documentId: original.id, status }, { renderer: rasters.renderer, fetch: async (url, init) => {
+    if (url === '/api/ai/vision-page') return Response.json({ imageSha256: hash(Number((init?.body as FormData).get('page'))) });
+    const body = JSON.parse(String(init?.body)); requested.push(body.pages);
+    return Response.json({ ...current, ai: { added: 0, rejected: 1, pages: body.pages } });
+  } });
+  assert.deepEqual(requested, [[2]]); assert.deepEqual(rasters.rendered, [2]);
+  assert.equal(result.processed, 1); assert.equal(result.rejected, 1); assert.equal(rasters.closes, 1);
 });
 
 test('unverified image responses and unsupported configured models cannot initiate extraction', async () => {

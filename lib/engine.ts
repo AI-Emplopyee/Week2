@@ -1,3 +1,5 @@
+import { documentSourceReady } from './source-completeness.ts';
+import { clientMemorySaveAction, dismissOrRevokeClientMemory, getClientIdentity, rememberClientCorrection } from './client-memory.ts';
 import { applyEmailGroupingAction } from './email-grouping.ts';
 import type {
   Action,
@@ -16,20 +18,13 @@ import type {
   WorkspaceState,
 } from "./types.ts";
 import {
-  classifyDocument,
-  extractDocument,
-  derivePageTypes,
   documentHasType,
   pageDocumentType,
 } from "./extraction.ts";
 import { simulateTestDraft, successfulRunForSnapshot } from "./ecus.ts";
 import { caseScopeMessage } from "./case-scope.ts";
 import { syntheticShipments } from "./demo.ts";
-import {
-  assessExtraction,
-  NO_USABLE_EXTRACTION,
-  pagesNeedingReview,
-} from "./extraction-quality.ts";
+import { assessExtraction } from "./extraction-quality.ts";
 import { groundKimiProposals, selectKimiPages, validateKimiPageReadings, KIMI_ENDPOINT } from "./kimi.ts";
 import {
   getDeclarationIssues,
@@ -49,10 +44,14 @@ import { groupShipmentDocuments } from "./shipment-grouping.ts";
 import {
   normalizedShipmentValue,
   isShipmentFactClear,
+  getEcusEvidenceIssues,
+  buildShipmentFacts,
+  getComparableShipmentWeights,
   syncShipmentDeclaration,
 } from "./shipment-autofill.ts";
-import { applyCorrespondenceAction } from "./shipment-correspondence.ts";
+import { applyCorrespondenceAction, syncAutomaticQuestionDrafts } from "./shipment-correspondence.ts";
 import { recordReviewHistory, recordsReviewHistory } from "./review-history.ts";
+import { withinGuideLineTolerance } from "./vnaccs-guide-rules.ts";
 
 export const FIELD_DEFINITIONS: FieldDefinition[] = [
   {
@@ -232,7 +231,8 @@ function candidatesFor(state: WorkspaceState, caseId: string) {
   );
   return state.candidates.filter(
     (c) =>
-      c.caseId === caseId && ids.has(`${c.documentId}:${c.documentVersion}`),
+      c.caseId === caseId && ids.has(`${c.documentId}:${c.documentVersion}`) && c.method.startsWith("kimi:") &&
+      state.documents.some(d => d.id === c.documentId && d.pages.some(p => p.page === c.page && !!p.aiReadability)),
   );
 }
 function audit(
@@ -345,7 +345,7 @@ export function getProposedFields(
   caseId: string,
 ): Record<string, string> {
   const c = findCase(state, caseId);
-  const candidates = candidatesFor(state, caseId);
+  const facts = buildShipmentFacts(state, c);
   const result: Record<string, string> = {};
   for (const def of FIELD_DEFINITIONS) {
     const reviewed = c.fields[def.key];
@@ -354,25 +354,8 @@ export function getProposedFields(
       continue;
     }
     if (def.manualOnly) continue;
-    const values = candidates.filter((x) => !x.lineId && x.field === def.key);
-    if (
-      def.key === "container" &&
-      values.length &&
-      values.every((x) =>
-        /^(?:[A-Z]{4}\d{7})(?:\s*[,;/]\s*[A-Z]{4}\d{7})*$/i.test(x.value),
-      )
-    )
-      result[def.key] = [
-        ...new Set(
-          values.flatMap(
-            (x) => x.value.toUpperCase().match(/[A-Z]{4}\d{7}/g) ?? [],
-          ),
-        ),
-      ]
-        .sort()
-        .join(", ");
-    else if (new Set(values.map((x) => sameField(x.field, x.value))).size === 1)
-      result[def.key] = values[0].value;
+    const fact = facts[def.key];
+    if (fact?.status === "agreed" && fact.value && isShipmentFactClear(state, def.key, fact.candidates)) result[def.key] = fact.value;
   }
   return result;
 }
@@ -381,18 +364,11 @@ function rebuildCandidatesAndGoods(
   c: ShipmentCase,
   preserveReviewed = false,
 ) {
-  const kimiDocuments = new Set(documentsFor(state, c)
-    .filter((document) => document.extractionPipeline === "kimi")
-    .map((document) => document.id));
   const activeVersions = new Set(
     documentsFor(state, c).map((d) => `${d.id}:${d.version}`),
   );
-  state.candidates = state.candidates.filter(
-    (x) =>
-      !activeVersions.has(`${x.documentId}:${x.documentVersion}`) ||
-      kimiDocuments.has(x.documentId) ||
-      x.method.startsWith("kimi:"),
-  );
+  // Historical readers' saved evidence stays available in history. Only current
+  // Kimi readings can create new facts or goods; there is no local extraction fallback.
   // An unrelated intake must not erase reviewed AI evidence. A move changes its current case only.
   for (const candidate of state.candidates)
     if (
@@ -405,17 +381,7 @@ function rebuildCandidatesAndGoods(
   const extracted = documentsFor(state, c).map((d) => {
     // New intake is interpreted by Kimi. Historical text remains available as
     // evidence, but must not be fed through the retired local extraction path.
-    if (d.extractionPipeline !== "kimi") derivePageTypes(d);
-    const result = d.extractionPipeline === "kimi"
-      ? { candidates: [] as Candidate[], goods: [] as GoodsLine[] }
-      : extractDocument(d);
-    result.candidates
-      .filter((x) => d.transcribedPages?.includes(x.page))
-      .forEach((x) => {
-        if (!x.method.startsWith("manual_transcription"))
-          x.method = `manual_transcription + ${x.method}`;
-        x.confidence = "low";
-      });
+    const result = { candidates: [] as Candidate[], goods: [] as GoodsLine[] };
     if (!result.goods.length && documentHasType(d, "invoice")) {
       const ai = state.candidates.filter(
         (x) =>
@@ -437,13 +403,8 @@ function rebuildCandidatesAndGoods(
             ? matches[0].value
             : "";
         };
-        if (
-          !value("description") ||
-          !value("quantity") ||
-          !value("unit") ||
-          !value("amount")
-        )
-          continue;
+        // Keep partial source rows so the ECUS form can ask for their missing cells.
+        if (!value("description")) continue;
         result.goods.push({
           id: lineId,
           description: value("description"),
@@ -451,10 +412,10 @@ function rebuildCandidatesAndGoods(
           unit: value("unit"),
           unitPrice: value("unitPrice"),
           amount: value("amount"),
-          hsCode: "",
-          origin: "",
-          dutyRate: "",
-          vatRate: "",
+          hsCode: value("hsCode"),
+          origin: value("origin"),
+          dutyRate: value("dutyRate"),
+          vatRate: value("vatRate"),
           sourceDocumentId: d.id,
           sourcePage: values[0].page,
           originalText: [...new Set(values.map((x) => x.originalText))].join(
@@ -484,7 +445,7 @@ function rebuildCandidatesAndGoods(
     (tables.find((table) => table.document.id === chosenSource) ?? tables[0])
       ?.goods ?? [];
   if (!preserveReviewed) c.goods = proposedGoods;
-  else if (c.goods.some((g) => g.reviewed || g.manual)) {
+  else if (c.goods.some((g) => g.reviewed || g.manual) || c.declarationDraft?.fields.some(entry => entry.goodsLineId && entry.generatedBy !== "shipment_extraction")) {
     // A reviewed table is a human choice of rows, including deliberately omitted rows.
     // Keep that choice instead of concatenating another invoice or reviving removed lines.
     // New contradictory evidence is surfaced by refreshAfterGrouping/getIssues.
@@ -544,10 +505,7 @@ function preparedDocument(
     caseId,
     type: source.extractionPipeline === "kimi"
       ? source.pages.find(page => page.documentType && page.documentType !== "other")?.documentType ?? "other"
-      : classifyDocument(
-      upload.name,
-      upload.pages.map((p) => p.text).join("\n"),
-    ),
+      : "other",
     version,
     active: true,
     uploadedAt: now(),
@@ -712,6 +670,7 @@ function regroupDocuments(
     newIds?: string[];
     caseIds?: string[];
     targetCaseId?: string;
+    focusCaseId?: string;
   } = {},
 ) {
   const allowedCases = state.cases.filter(
@@ -733,12 +692,11 @@ function regroupDocuments(
     ]),
   );
   const evidence = documents.flatMap((d) => [
-    ...extractDocument(d).candidates,
     ...state.candidates.filter(
       (x) =>
         x.documentId === d.id &&
         x.documentVersion === d.version &&
-        x.method.startsWith("kimi:"),
+        x.method.startsWith("kimi:") && d.pages.some(page => page.page === x.page && !!page.aiReadability),
     ),
   ]);
   const groups = groupShipmentDocuments(documents, evidence, allowedCases);
@@ -757,6 +715,9 @@ function regroupDocuments(
   )
     incomingGroups[0].caseIds.push(emptyTarget.id);
   for (const group of groups) {
+    // A page reread may discover a genuinely related shipment, but must not
+    // refresh unrelated histories merely because grouping considers all evidence.
+    if (options.focusCaseId && !group.caseIds.includes(options.focusCaseId)) continue;
     const sourceCases = group.caseIds
       .map((id) => findCase(state, id))
       .sort(
@@ -959,20 +920,12 @@ export function getIssues(state: WorkspaceState, caseId?: string): Issue[] {
   )) {
     const docs = documentsFor(state, c);
     const candidates = candidatesFor(state, c.id);
+    const facts = buildShipmentFacts(state, c);
     const proposed = getProposedFields(state, c.id);
-    const visuallyRead = (document: ShipmentDocument) =>
-      (document.mime === "application/pdf" || document.mime.startsWith("image/")) &&
-      document.pages.length > 0 &&
-      document.pages.every(page => document.aiProcessedPages?.includes(page.page)) &&
-      (document.extractionPipeline !== "kimi" || document.extractionStatus === "extracted");
+    const sourceRead = (document: ShipmentDocument) => documentSourceReady(state, document);
     const extractionComplete =
       c.groupingConfirmed &&
-      docs.filter(d => !d.referenceOnly).every(
-        (d) =>
-          (d.extractionPipeline === "kimi" ? d.extractionStatus === "extracted" : visuallyRead(d) || (d.extractionStatus === "extracted" &&
-          !pagesNeedingReview(d.pages).length &&
-          d.pages.some((page) => page.text.trim()))),
-      );
+      docs.filter(d => !d.referenceOnly).every(sourceRead);
     const add = (
       key: string,
       kind: Issue["kind"],
@@ -1039,71 +992,28 @@ export function getIssues(state: WorkspaceState, caseId?: string): Issue[] {
         [],
         docs.map((d) => d.id),
       );
-    if (extractionComplete && !docs.some((d) => !d.referenceOnly && documentHasType(d, "invoice")))
-      add(
-        "missing-invoice",
-        "missing",
-        "Thiếu hóa đơn",
-        "Bộ kiểm tra hồ sơ của bản thử nghiệm cần hóa đơn thương mại. Đây không phải yêu cầu pháp lý được xác minh.",
-      );
-    if (
-      extractionComplete &&
-      !docs.some((d) => !d.referenceOnly && documentHasType(d, "packing_list"))
-    )
-      add(
-        "missing-packing",
-        "missing",
-        "Thiếu phiếu đóng gói",
-        "Cần phiếu đóng gói để đối chiếu số lượng, kiện và trọng lượng.",
-      );
-    if (
-      extractionComplete &&
-      !docs.some(
-        (d) =>
-          !d.referenceOnly && (documentHasType(d, "bill_of_lading") ||
-          documentHasType(d, "air_waybill")),
-      )
-    )
-      add(
-        "missing-transport",
-        "missing",
-        "Thiếu vận đơn",
-        "Cần vận đơn đường biển hoặc hàng không để đối chiếu vận chuyển.",
-      );
     for (const d of docs) {
       if (d.referenceOnly) continue;
-      const clearlySupplemental = d.extractionPipeline === "kimi" && d.extractionStatus === "extracted" &&
-        d.pages.length > 0 && d.pages.every(page => page.aiReadability === "clear" && page.documentType === "other");
-      if (d.extractionPipeline === "kimi" && d.extractionStatus === "pending_ai") {
+      if (d.extractionPipeline !== "kimi") {
+        add(`kimi-original-${d.id}`, "document", "Cần Kimi đọc bản gốc", "Dữ liệu cũ chưa được Kimi đọc. Ứng dụng sẽ đọc lại bản gốc khi Kimi được cấu hình; chưa yêu cầu bổ sung thông tin từ nội dung chưa đọc.", undefined, [], [d.id]);
+        continue;
+      }
+      const clearlySupplemental = sourceRead(d) && d.pages.every(page => page.documentType === "other");
+      if (d.extractionStatus === "pending_ai") {
         add(`document-${d.id}`, "document", "Đang chờ Kimi đọc chứng từ",
           d.aiError || "Kimi chưa đọc xong chứng từ này. Chỉ kiểm tra thông tin còn thiếu sau khi đã xử lý đầy đủ bộ chứng từ.",
           undefined, [], [d.id]);
         continue;
       }
-      if (
-        !visuallyRead(d) && (d.extractionStatus !== "extracted" ||
-        (d.extractionPipeline !== "kimi" && pagesNeedingReview(d.pages).length))
-      )
+      if (!sourceRead(d))
         add(
           `document-${d.id}`,
           "document",
           d.extractionStatus === "needs_transcription" ||
-            pagesNeedingReview(d.pages).length
-            ? "Chứng từ cần nhập nội dung"
+            d.pages.some(page => page.aiReadability === "uncertain") || d.aiRejectedPages?.length
+            ? "Kimi chưa đọc rõ chứng từ"
             : "Chưa đọc được chứng từ",
-          d.extractionError ||
-            assessExtraction(d.pages).extractionError ||
-            NO_USABLE_EXTRACTION,
-          undefined,
-          [],
-          [d.id],
-        );
-      else if (d.extractionPipeline !== "kimi" && !visuallyRead(d) && !d.pages.some((p) => p.text.trim()))
-        add(
-          `empty-${d.id}`,
-          "document",
-          "Chứng từ không có nội dung",
-          "Không có trang văn bản để đối chiếu.",
+          d.extractionError || d.aiError || "Kimi chưa đọc rõ tất cả các trang. Thử đọc lại hoặc cung cấp bản rõ hơn.",
           undefined,
           [],
           [d.id],
@@ -1146,7 +1056,7 @@ export function getIssues(state: WorkspaceState, caseId?: string): Issue[] {
         );
     }
     for (const def of FIELD_DEFINITIONS) {
-      const values = candidates.filter((x) => x.field === def.key && !x.lineId);
+      const values = facts[def.key]?.candidates ?? [];
       const reviewed = c.fields[def.key];
       const validReview =
         !!reviewed && !reviewed.stale && present(reviewed.value);
@@ -1158,14 +1068,8 @@ export function getIssues(state: WorkspaceState, caseId?: string): Issue[] {
             : sameField(x.field, x.value),
         ),
       );
-      if (extractionComplete && def.required && !validReview && !values.length)
-        add(
-          `missing-${def.key}`,
-          "missing",
-          `Thiếu ${def.label.toLowerCase()}`,
-          "Không có giá trị nguồn hoặc giá trị nhập tay đã rà soát.",
-          def.key,
-        );
+      // Required fields are checked against the ECUS form below. The source
+      // panel must not add a second, different set of mandatory header fields.
       if (distinct.size > 1)
         add(
           `conflict-${def.key}`,
@@ -1261,13 +1165,13 @@ export function getIssues(state: WorkspaceState, caseId?: string): Issue[] {
           qty &&
           price &&
           amount &&
-          compareDecimal(multiplyDecimal(qty, price), amount) !== 0
+          !withinGuideLineTolerance(multiplyDecimal(qty, price), amount)
         )
           add(
             `goods-math-${g.id}`,
             "goods",
             "Thành tiền dòng chưa khớp",
-            `${g.description}: số lượng × đơn giá = ${formatDecimal(multiplyDecimal(qty, price))}, thành tiền = ${g.amount}. So sánh chính xác, chưa áp dụng làm tròn. Giải thích chênh lệch, phí hoặc chiết khấu.`,
+            `${g.description}: số lượng × đơn giá = ${formatDecimal(multiplyDecimal(qty, price))}, thành tiền = ${g.amount}. Chênh lệch vượt ±1 theo mục 1.86 của hướng dẫn được cung cấp.`,
             undefined,
             candidates.filter((x) => x.lineId === g.id),
           );
@@ -1290,14 +1194,13 @@ export function getIssues(state: WorkspaceState, caseId?: string): Issue[] {
           );
       }
     }
-    const net = parseExactDecimal(proposed.netWeight || ""),
-      gross = parseExactDecimal(proposed.grossWeight || "");
-    if (net && gross && compareDecimal(net, gross) > 0)
+    const weights = getComparableShipmentWeights(state, c, proposed);
+    if (weights && compareDecimal(weights.net, weights.gross) > 0)
       add(
         "weight",
         "goods",
         "Trọng lượng tịnh lớn hơn cả bì",
-        `Trọng lượng tịnh ${formatDecimal(net)}; cả bì ${formatDecimal(gross)}. Kiểm tra đơn vị và nguồn.`,
+        `Trọng lượng tịnh ${formatDecimal(weights.net)} kg; cả bì ${formatDecimal(weights.gross)} kg. Kiểm tra đơn vị và nguồn.`,
         "netWeight",
         candidates.filter((x) =>
           ["netWeight", "grossWeight"].includes(x.field),
@@ -1345,55 +1248,39 @@ export function getIssues(state: WorkspaceState, caseId?: string): Issue[] {
           );
       }
     }
-    const sourceDescriptions = docs
-      .flatMap((d) =>
-        d.pages
-          .filter((page) =>
-            ["invoice", "packing_list"].includes(pageDocumentType(d, page)),
-          )
-          .map((page) => {
-            const descriptions = candidates.filter(
-              (x) =>
-                x.documentId === d.id &&
-                x.page === page.page &&
-                x.field === "description" &&
-                x.lineId &&
-                candidates.some(
-                  (q) => q.lineId === x.lineId && q.field === "quantity",
-                ),
-            );
-            return {
-              d,
-              values: descriptions.map((x) => same(x.value)).sort(),
-              units: candidates
-                .filter(
-                  (x) =>
-                    x.documentId === d.id &&
-                    x.page === page.page &&
-                    x.field === "unit",
-                )
-                .map((x) => same(x.value)),
-            };
-          }),
-      )
-      .filter((x) => x.values.length);
-    const comparableDescriptions = sourceDescriptions.filter(
-      (x) =>
-        !x.units.length ||
-        sourceDescriptions[0].units.some((unit) => x.units.includes(unit)),
+    // A document's invoice pages are one list, not competing full-shipment
+    // lists. Packing components without explicit row units cannot establish
+    // that their descriptions/counts describe the same commercial goods.
+    const sourceDescriptions = docs.filter(document => !document.referenceOnly).flatMap(document =>
+      (["invoice", "packing_list"] as const).flatMap(role => {
+        const pages = new Set(document.pages.filter(page => pageDocumentType(document, page) === role).map(page => page.page));
+        const evidence = candidates.filter(candidate => candidate.documentId === document.id && pages.has(candidate.page) && candidate.lineId);
+        const descriptions = evidence.filter(candidate => candidate.field === "description");
+        const rows = [...new Set(descriptions.map(candidate => candidate.lineId))].map(lineId => {
+          const fields = (field: string) => evidence.filter(candidate => candidate.lineId === lineId && candidate.field === field);
+          const description = fields("description"), quantity = fields("quantity"), unit = fields("unit");
+          if (![description, quantity, unit].every(values => values.length && isShipmentFactClear(state, values[0].field, values))) return undefined;
+          return { description: same(description[0].value), unit: same(unit[0].value) };
+        });
+        if (!rows.length || rows.some(row => !row)) return [];
+        const complete = rows.filter(row => row !== undefined);
+        return [{ role, values: complete.map(row => row.description).sort(), units: [...new Set(complete.map(row => row.unit))].sort(), descriptions }];
+      }),
     );
-    if (
-      comparableDescriptions.length > 1 &&
-      new Set(comparableDescriptions.map((x) => JSON.stringify(x.values)))
-        .size > 1
-    )
+    const conflictingDescriptions = sourceDescriptions.flatMap((left, index) => sourceDescriptions.slice(index + 1).flatMap(right =>
+      (left.role === "invoice" || right.role === "invoice") &&
+      JSON.stringify(left.units) === JSON.stringify(right.units) &&
+      JSON.stringify(left.values) !== JSON.stringify(right.values)
+        ? [...left.descriptions, ...right.descriptions] : [],
+    ));
+    if (conflictingDescriptions.length)
       add(
         "goods-description-conflict",
         "conflict",
         "Danh sách hàng giữa chứng từ khác nhau",
         "Mô tả / số dòng trên hóa đơn và phiếu đóng gói không trùng. Cần đối chiếu bảng hàng và ghi lý do xử lý.",
         undefined,
-        candidates.filter((x) => x.lineId && x.field === "description"),
+        [...new Map(conflictingDescriptions.map(candidate => [candidate.id, candidate])).values()],
         [],
         c.goods.every((g) => g.reviewed) &&
           c.goods.every((g) => present(g.reason)),
@@ -1439,13 +1326,19 @@ export function getIssues(state: WorkspaceState, caseId?: string): Issue[] {
           field,
         );
     }
+    const ecusEvidenceIssues = getEcusEvidenceIssues(state, c, {
+      header: new Set(FIELD_DEFINITIONS.map(field => field.key)),
+      goods: new Set(["description", "quantity", "unit", "unitPrice", "amount"]),
+    });
     issues.push(
+      ...ecusEvidenceIssues,
       ...getDeclarationIssues(c.declarationDraft, {
         caseId: c.id,
         documents: state.documents,
         candidates: state.candidates,
         goods: c.goods,
-      }),
+      }).filter(issue => !issue.id.endsWith(':required') ||
+        (extractionComplete && !ecusEvidenceIssues.some(evidence => evidence.ecusFieldKey === issue.ecusFieldKey && evidence.goodsLineId === issue.goodsLineId))),
     );
     const recentRun = state.handoffs.filter((h) => h.caseId === c.id).at(-1);
     if (
@@ -1496,8 +1389,8 @@ export function applyAction(
     if (state.documents.some((d) => d.synthetic))
       throw new Error("Dữ liệu demo đã có trong workspace.");
     for (const sample of syntheticShipments()) {
-      const c = newCase(state, sample.title, actor);
-      addUploads(state, sample.documents, actor, c.id);
+      addUploads(state, sample.documents, actor, undefined, { name: 'Synthetic demonstration', folder: sample.title, caseType: 'import' });
+      const c = state.cases.find(item => item.sourceCollection?.name === 'Synthetic demonstration' && item.sourceCollection.folder === sample.title)!;
       if (sample.documents.length > 1) {
         c.groupingConfirmed = true;
         c.groupingConfidence = "high";
@@ -1525,6 +1418,14 @@ export function applyAction(
       throw new Error(
         "Chứng từ đã thay đổi; cần gửi lại yêu cầu trên bản hiện tại.",
       );
+    const readingState = () => JSON.stringify({
+      type: document.type, pipeline: document.extractionPipeline,
+      status: document.extractionStatus, error: document.extractionError,
+      aiStatus: document.aiStatus, aiError: document.aiError,
+      processed: document.aiProcessedPages, rejected: document.aiRejectedPages,
+      pages: document.pages.map(page => [page.page, page.documentType, page.aiReadability]),
+    });
+    const previousReadingState = readingState();
     const visionEvidence = action.visionEvidence ?? [];
     const pages = selectKimiPages(document, action.pages, visionEvidence.map(page => page.page));
     const kimiOnly = document.extractionPipeline === "kimi" || action.pageReadings !== undefined;
@@ -1567,9 +1468,13 @@ export function applyAction(
     }
     // Progress means the page was processed, not that every model interpretation
     // passed grounding. Keep rejected-page warnings until those pages are rerun cleanly.
+    const rejectedPages = grounded.rejectionDiagnostics?.filter(diagnostic => selectedPages.includes(diagnostic.page)).map(diagnostic => diagnostic.page) ?? [];
+    // Attribute a rejected reading to its actual source page, preserving clean
+    // neighbours. An entirely un-attributable rejection cannot certify the batch.
+    const pagesToRetry = rejectedPages.length ? rejectedPages : grounded.rejected ? selectedPages : [];
     document.aiRejectedPages = [...new Set([
       ...(document.aiRejectedPages ?? []).filter(page => !selectedPages.includes(page)),
-      ...(grounded.rejected ? selectedPages : []),
+      ...pagesToRetry,
     ])].sort((a, b) => a - b);
     const warnings = [
       ...(document.aiStatus === "partial" ? ["AI has not checked every page. Continue the remaining pages."] : []),
@@ -1603,10 +1508,15 @@ export function applyAction(
             prior.originalText === candidate.originalText &&
             prior.method === candidate.method &&
             JSON.stringify(prior.visualEvidence) === JSON.stringify(candidate.visualEvidence) &&
-            prior.confidence === candidate.confidence && prior.readability === candidate.readability,
+            prior.confidence === candidate.confidence && prior.confidenceScore === candidate.confidenceScore && prior.readability === candidate.readability,
         ),
     );
     if (fresh.length || retired.length || kimiOnly) {
+      const materialChange = previousReadingState !== readingState() ||
+        (kimiOnly
+          ? retired.length !== fresh.length || retired.some(prior => !fresh.some(candidate =>
+            sameProof(prior, candidate) && prior.confidence === candidate.confidence && prior.readability === candidate.readability))
+          : fresh.length > 0);
       const affected = new Set([...fresh, ...retired].map((candidate) => candidate.field));
       for (const field of affected)
         if (
@@ -1620,8 +1530,10 @@ export function applyAction(
             !fresh.some(candidate => candidate.id === c.fields[field].candidateId)))
         )
           c.fields[field].stale = true;
-      c.resolutions = [];
-      clearApproval(
+      // Each resolution is bound to its own issue fingerprint. A changed value
+      // reopens that issue naturally; rereading another field or only changing
+      // a model estimate must not erase a reviewer's unchanged explanation.
+      if (materialChange) clearApproval(
         state,
         c,
         actor,
@@ -1639,8 +1551,8 @@ export function applyAction(
         // Samples are provisional packets. Add evidence inside the packet without
         // silently grouping it with a live shipment or confirming its membership.
         rebuildCandidatesAndGoods(state, c, true);
-        refreshAfterGrouping(state, c, actor, previousCandidates, true);
-      } else regroupDocuments(state, actor);
+        refreshAfterGrouping(state, c, actor, previousCandidates, materialChange);
+      } else regroupDocuments(state, actor, { focusCaseId: c.id });
       for (const candidate of fresh.filter(
         (candidate) => candidate.normalizations.length,
       ))
@@ -1676,6 +1588,7 @@ export function applyAction(
           pageReadings: action.pageReadings,
           added: fresh.length,
           rejected: grounded.rejected,
+          rejectionDiagnostics: grounded.rejectionDiagnostics,
           duplicate: grounded.candidates.length - fresh.length,
           candidateIds: fresh.map((candidate) => candidate.id),
         },
@@ -1751,6 +1664,11 @@ export function applyAction(
         },
       );
     }
+  } else if (action.type === 'refresh_case_automation') {
+    const c = findCase(state, action.caseId);
+    assertReviewable(c);
+    syncShipmentDeclaration(state, c, actor);
+    syncAutomaticQuestionDrafts(state, actor, getIssues(state, c.id), action.locale, c.id);
   } else if (action.type === 'refresh_extraction') {
     const c = findCase(state, action.caseId);
     assertReviewable(c);
@@ -1769,7 +1687,8 @@ export function applyAction(
     regroupDocuments(state, actor, { caseIds: action.caseIds });
   } else if (
     action.type === "draft_questions" ||
-    action.type === "save_email_draft"
+    action.type === "save_email_draft" ||
+    action.type === "approve_email_draft"
   ) {
     const caseId =
       action.type === "draft_questions"
@@ -1780,6 +1699,21 @@ export function applyAction(
     const c = findCase(state, caseId);
     assertReviewable(c);
     applyCorrespondenceAction(state, action, actor, getIssues(state, caseId));
+  } else if (action.type === 'apply_client_memory' || action.type === 'dismiss_client_memory' || action.type === 'revoke_client_memory') {
+    const c = findCase(state, action.caseId);
+    assertReviewable(c);
+    if (c.caseType !== 'import') throw new Error('Client suggestions apply to import declarations only.');
+    if (action.type === 'apply_client_memory') {
+      const savedAction = clientMemorySaveAction(state, c, action);
+      const before = c.declarationDraft?.fields.find(entry => entry.fieldId === savedAction.fieldId && !entry.goodsLineId) ?? null;
+      c.declarationDraft = saveDeclarationField(c.declarationDraft, savedAction, { caseId: c.id, documents: state.documents, candidates: state.candidates, goods: c.goods, actor, at: now() });
+      clearApproval(state, c, actor, 'Client information was explicitly applied; review the current declaration again.');
+      syncShipmentDeclaration(state, c, actor);
+      audit(state, actor, 'client_memory_applied', savedAction.reason, { caseId: c.id, field: savedAction.fieldId, before, after: { memoryId: action.memoryId, entry: c.declarationDraft.fields.find(entry => entry.fieldId === savedAction.fieldId && !entry.goodsLineId) } });
+    } else {
+      const memory = dismissOrRevokeClientMemory(state, c, action, actor, now());
+      audit(state, actor, action.type === 'revoke_client_memory' ? 'client_memory_revoked' : 'client_memory_dismissed', action.type === 'revoke_client_memory' ? 'Stop suggesting this remembered client correction.' : 'Dismiss this suggestion for the current shipment.', { caseId: c.id, field: memory.fieldKey, after: { memoryId: memory.id } });
+    }
   } else if (action.type === "remove_declaration_field") {
     const c = findCase(state, action.caseId);
     assertReviewable(c);
@@ -1815,6 +1749,7 @@ export function applyAction(
       entry.fieldId === action.fieldId &&
       entry.goodsLineId === action.goodsLineId;
     const before = c.declarationDraft?.fields.find(matches) ?? null;
+    const identityBefore = getClientIdentity(c);
     c.declarationDraft = saveDeclarationField(c.declarationDraft, action, {
       caseId: c.id,
       documents: state.documents,
@@ -1823,6 +1758,22 @@ export function applyAction(
       actor,
       at: now(),
     });
+    // Keep the commercial table used by arithmetic checks and reports aligned
+    // with edits in the IDA form. A cell edit never approves the entire row.
+    const line = action.goodsLineId ? c.goods.find(line => line.id === action.goodsLineId) : undefined;
+    if (line && action.applicability === "applicable") {
+      const mappings: Record<string, Record<string, keyof Pick<GoodsLine, "description" | "quantity" | "unit" | "unitPrice" | "amount" | "hsCode" | "origin" | "dutyRate" | "vatRate">>> = {
+        "1.78": { text: "description" }, "1.74": { code: "hsCode" }, "1.79": { code: "origin" },
+        "1.83": { amount: "quantity", unitCode: "unit" }, "1.86": { amount: "unitPrice" },
+        "1.85": { amount: "amount" }, "1.76": { amount: "dutyRate" }, "ecus.vatTaxRate": { amount: "vatRate" },
+      };
+      let changed = false;
+      for (const [component, key] of Object.entries(mappings[action.fieldId] || {})) {
+        const value = (action.value as unknown as Record<string, string>)[component];
+        if (typeof value === "string" && line[key] !== value) { line[key] = value; changed = true; }
+      }
+      if (changed) { line.manual = true; line.reviewed = false; line.reason = action.reason; }
+    }
     clearApproval(
       state,
       c,
@@ -1830,6 +1781,8 @@ export function applyAction(
       "Bản nháp chỉ tiêu khai báo thay đổi; cần duyệt lại phiên bản hiện hành.",
     );
     syncShipmentDeclaration(state, c, actor);
+    const memory = rememberClientCorrection(state, c, action, before, actor, now(), identityBefore);
+    if (memory) audit(state, actor, 'client_memory_recorded', 'Saved an explicit human correction for suggestions in later declarations for this client.', { caseId: c.id, field: memory.fieldKey, after: { memoryId: memory.id, previousValue: memory.previousValue, value: memory.value } });
     audit(
       state,
       actor,
@@ -1904,6 +1857,7 @@ export function applyAction(
     const activeDocs = documentsFor(state, c);
     const existingCandidates = candidatesFor(state, c.id);
     c.goods = action.goods.map((g) => {
+      const old = before.find((x) => x.id === g.id);
       if (!present(g.id)) throw new Error("Dòng hàng cần ID.");
       if (g.sourceDocumentId) {
         const source = activeDocs.find((d) => d.id === g.sourceDocumentId);
@@ -1917,10 +1871,10 @@ export function applyAction(
         const originalLine = existingCandidates.find(
           (x) => x.lineId === g.id && x.documentId === g.sourceDocumentId,
         );
-        if (originalLine && g.originalText !== originalLine.originalText)
+        const unchangedSource = old?.sourceDocumentId === g.sourceDocumentId && old?.sourcePage === g.sourcePage && old?.originalText === g.originalText;
+        if (!unchangedSource && ((old?.sourceDocumentId === g.sourceDocumentId && g.originalText !== old.originalText) || (originalLine && g.originalText !== originalLine.originalText)))
           throw new Error("Không được thay đổi văn bản nguồn của dòng hàng.");
       }
-      const old = before.find((x) => x.id === g.id);
       const changed =
         !old ||
         [
@@ -2207,27 +2161,9 @@ export function applyAction(
     document.extractionError = document.extractionPipeline === "kimi"
       ? "Kimi must read the current document version." : assessment.extractionError;
     if (document.extractionPipeline === "kimi") for (const page of document.pages) delete page.aiReadability;
-    if (document.type === "other" && document.extractionPipeline !== "kimi")
-      document.type = classifyDocument(
-        document.name,
-        document.pages.map((p) => p.text).join("\n"),
-      );
     invalidate(state, c, actor, "Nội dung chép từ chứng từ thay đổi.");
     c.groupingConfirmed = false;
     rebuildCandidatesAndGoods(state, c, true);
-    state.candidates
-      .filter(
-        (x) =>
-          x.documentId === document.id &&
-          x.documentVersion === document.version &&
-          document.transcribedPages?.includes(x.page),
-      )
-      .forEach((x) => {
-        if (!x.method.startsWith("manual_transcription"))
-          if (!x.method.startsWith("manual_transcription"))
-            x.method = `manual_transcription + ${x.method}`;
-        x.confidence = "low";
-      });
     syncShipmentDeclaration(state, c, actor);
     audit(state, actor, "document_transcribed", action.reason.trim(), {
       caseId: c.id,
@@ -2405,6 +2341,14 @@ export function applyAction(
       { before, after: state.settings },
     );
   } else throw new Error("Hành động không được hỗ trợ.");
+  if (action.type !== 'refresh_case_automation') {
+    const clientMemoryChanged = (state.clientMemories?.length ?? 0) !== (original.clientMemories?.length ?? 0) || action.type === 'revoke_client_memory';
+    const actionCaseId = 'caseId' in action ? action.caseId : 'draftId' in action ? state.emailDrafts?.find(draft => draft.id === action.draftId)?.caseId : undefined;
+    // Grouping may move this action's evidence into an older related shipment.
+    // Refresh that destination's questions while leaving unrelated cases alone.
+    const changedCaseId = clientMemoryChanged ? undefined : state.cases.find(shipment => shipment.id === actionCaseId)?.mergedInto ?? actionCaseId;
+    syncAutomaticQuestionDrafts(state, actor, getIssues(state, changedCaseId), undefined, changedCaseId);
+  }
   if (previousQuestions.length && "caseId" in action)
     recordReviewHistory(original, state, action, actor, previousQuestions, getIssues(state, action.caseId));
   state.revision = original.revision + 1;

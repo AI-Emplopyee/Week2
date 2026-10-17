@@ -57,6 +57,8 @@ function sameSourceQuestion(a: Issue, b: Issue): boolean {
     a.id === b.id ||
     (!!a.field &&
       a.field === b.field &&
+      a.goodsLineId === b.goodsLineId &&
+      a.ecusFieldKey === b.ecusFieldKey &&
       sourceQuestionKinds.has(a.kind) &&
       sourceQuestionKinds.has(b.kind))
   );

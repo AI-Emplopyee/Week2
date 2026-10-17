@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyDocument, classifyPage, derivePageTypes, documentHasType, extractDocument, normalizeValue } from '../lib/extraction.ts';
-import { applyAction, createEmptyWorkspace, getIssues, getProposedFields } from '../lib/engine.ts';
+import { classifyDocument, classifyPage, derivePageTypes, documentHasType, extractDocument, normalizeValue } from './helpers/legacy-extraction.ts';
+import { createEmptyWorkspace, getIssues, getProposedFields } from '../lib/engine.ts';
+import { applyFixtureAction as applyAction } from './helpers/kimi-fixtures.ts';
 import type { ShipmentDocument, SourcePage } from '../lib/types.ts';
 
 // Entirely synthetic, deliberately varied supplier-independent layouts. No client sample data.
@@ -58,7 +59,9 @@ test('house/master B/L identifiers and transport parties remain distinct from co
   assert.equal(hr.find(c => c.field === 'houseShipper')!.value, 'Demo Supplier'); assert.equal(mr.find(c => c.field === 'masterShipper')!.value, 'Demo Forwarder');
   assert.equal(hr.some(c => ['importer', 'exporter', 'billOfLading'].includes(c.field)), false); assert.equal(mr.some(c => ['importer', 'exporter', 'billOfLading'].includes(c.field)), false);
   const state = applyAction(createEmptyWorkspace('test'), { type: 'intake', documents: [h, m] }, actor);
-  assert.equal(state.cases.length, 1); assert.equal(getIssues(state).some(i => i.kind === 'conflict' && (/[bB]illOfLading/.test(i.field || '') || /shipper|consignee/i.test(i.field || ''))), false);
+  assert.equal(state.cases.length, 1);
+  assert.equal(getIssues(state).some(i => i.kind === 'conflict' && /shipper|consignee/i.test(i.field || '')), false);
+  assert.ok(getIssues(state).some(i => i.kind === 'conflict' && i.field === 'billOfLading'), 'Neither consignee matches an importer, so the declaration bill remains a question.');
 });
 
 test('paired transport headers require two explicit identifiers and reject unrelated label text', () => {
@@ -74,8 +77,8 @@ test('multiple container identifiers are one set and cannot conflict with themse
 });
 
 test('equal explicit decimal values do not manufacture weight conflicts', () => {
-  const invoice = doc('invoice.pdf', [{ page: 1, text: 'COMMERCIAL INVOICE\nInvoice Number: NUM-1\nGross Weight: 1300.00' }]);
-  const packing = doc('packing.pdf', [{ page: 1, text: 'PACKING LIST\nInvoice Number: NUM-1\nGross Weight: 1300.000' }]);
+  const invoice = doc('invoice.pdf', [{ page: 1, text: 'COMMERCIAL INVOICE\nInvoice Number: NUM-1\nImporter: Synthetic Buyer\nGross Weight: 1300.00' }]);
+  const packing = doc('packing.pdf', [{ page: 1, text: 'PACKING LIST\nInvoice Number: NUM-1\nImporter: Synthetic Buyer\nGross Weight: 1300.000' }]);
   const state = applyAction(createEmptyWorkspace('test'), { type: 'intake', documents: [invoice, packing] }, actor);
   assert.equal(getIssues(state).some(i => i.kind === 'conflict' && i.field === 'grossWeight'), false);
   assert.equal(getProposedFields(state, state.cases[0].id).grossWeight, '1300.00');

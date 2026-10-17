@@ -5,6 +5,24 @@ import { PDFiumLibrary } from '@hyzyla/pdfium';
 import { prepareFile, prepareIntakeFile } from '../lib/client-intake.ts';
 import { rasterizePdfPage } from '../lib/pdf-raster.ts';
 import { openPdfRasterizer } from '../lib/client-pdf-raster.ts';
+import { applyAction, createEmptyWorkspace } from '../lib/engine.ts';
+import type { ShipmentDocument } from '../lib/types.ts';
+
+test('historical OCR and native PDF text cannot invoke a runtime shipment parser or classifier', () => {
+  for (const textSource of ['ocr', 'pdf_text', 'office', 'manual'] as const) {
+    const source: ShipmentDocument = {
+      id: 'legacy', caseId: 'case', name: 'COMMERCIAL INVOICE.pdf', type: 'other', mime: 'application/pdf',
+      size: 100, sha256: 'legacy', version: 1, active: true, uploadedAt: '', extractionStatus: 'extracted', synthetic: true,
+      pages: [{ page: 1, text: 'COMMERCIAL INVOICE\nInvoice No: LOCAL-MUST-NOT-BE-READ\nDescription | Quantity | Unit | Unit Price | Amount\nWidget | 2 | PCS | 5 | 10', textSource }],
+    };
+    const state = applyAction(createEmptyWorkspace(`no-parser-${textSource}`), { type: 'intake', documents: [source] },
+      { id: 'test', name: 'Synthetic reviewer', email: 'test@example.invalid' });
+    assert.deepEqual(state.candidates, []);
+    assert.deepEqual(state.cases[0].goods, []);
+    assert.equal(state.documents[0].type, 'other');
+    assert.equal(state.documents[0].pages[0].documentType, undefined);
+  }
+});
 
 test('PDFs and image uploads have no locally extracted facts and wait for Kimi', async () => {
   const pdf = new File(['%PDF-1.7\nhidden text should not become a candidate'], 'invoice.pdf', { type: 'application/pdf' });

@@ -8,7 +8,6 @@ import type {
   Actor,
   Issue,
   ShipmentCase,
-  ShipmentDocument,
   WorkspaceState,
 } from "@/lib/types";
 import { Loader2 } from "lucide-react";
@@ -16,16 +15,8 @@ import React, { useState } from "react";
 import { ModalShell } from "./modal-shell";
 import { activeDocs } from "./shared";
 export type ShipmentDialogRequest = {
-  kind:
-    | "create"
-    | "edit_case"
-    | "group"
-    | "transcribe"
-    | "complete"
-    | "reopen"
-    | "resolve";
+  kind: "create" | "edit_case" | "group" | "complete" | "reopen" | "resolve";
   issue?: Issue;
-  initialText?: string;
 };
 type Props = {
   request: ShipmentDialogRequest;
@@ -33,8 +24,6 @@ type Props = {
   issues: Issue[];
   actor: Actor;
   shipment?: ShipmentCase;
-  source?: ShipmentDocument;
-  page: number;
   localMode: boolean;
   busy: boolean;
   selectedDocuments: string[];
@@ -50,8 +39,6 @@ export function ShipmentActionDialog({
   issues,
   actor,
   shipment: current,
-  source,
-  page,
   localMode,
   busy,
   selectedDocuments: selectedDocs,
@@ -63,8 +50,7 @@ export function ShipmentActionDialog({
 }: Props) {
   const { t, locale } = useLocale();
   const [modalText, setModalText] = useState(
-    modal.initialText ??
-      (modal.kind === "edit_case" ? current?.title || "" : ""),
+    modal.kind === "edit_case" ? current?.title || "" : "",
   );
   const [modalTarget, setModalTarget] = useState(
     modal.kind === "edit_case" ? current?.assignedTo || "" : "",
@@ -115,16 +101,6 @@ export function ShipmentActionDialog({
           },
           t("Đã lưu quyết định xử lý"),
         );
-      if (modal.kind === "transcribe" && source)
-        ok = await mutation(
-          {
-            type: "transcribe_document",
-            documentId: source.id,
-            pages: [{ page, text: modalText }],
-            reason: t("Người rà soát nhập văn bản từ chứng từ gốc"),
-          },
-          t("Đã lưu bản chép và phân tích lại dữ liệu"),
-        );
       if (modal.kind === "group") {
         if (groupMode === "merge")
           ok = await mutation(
@@ -167,13 +143,11 @@ export function ShipmentActionDialog({
             ? t("Thông tin hồ sơ")
             : modal.kind === "group"
               ? t("Sắp xếp chứng từ")
-              : modal.kind === "transcribe"
-                ? t("Nhập văn bản từ chứng từ")
-                : modal.kind === "complete"
-                  ? t("Hoàn tất và lưu trữ hồ sơ")
-                  : modal.kind === "reopen"
-                    ? t("Mở lại hồ sơ để điều chỉnh")
-                    : t("Ghi nhận quyết định rà soát")
+              : modal.kind === "complete"
+                ? t("Hoàn tất và lưu trữ hồ sơ")
+                : modal.kind === "reopen"
+                  ? t("Mở lại hồ sơ để điều chỉnh")
+                  : t("Ghi nhận quyết định rà soát")
       }
       onClose={() => onClose()}
     >
@@ -235,7 +209,9 @@ export function ShipmentActionDialog({
                   onChange={(e) => setGroupMode(e.target.value)}
                 >
                   {Object.entries(CASE_TYPE_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>{t(label)}</option>
+                    <option key={value} value={value}>
+                      {t(label)}
+                    </option>
                   ))}
                 </select>
               </label>
@@ -327,28 +303,6 @@ export function ShipmentActionDialog({
                   />
                 </label>
               )}
-            </>
-          ) : modal.kind === "transcribe" ? (
-            <>
-              <p className="muted">
-                {t("Chép đúng nội dung trang ")}
-                {page} {t("của ")}
-                <strong>{source?.name}</strong>
-                {t(
-                  ". Không điền dữ kiện không có trong bản gốc. Bản chép được lưu vào lịch sử.",
-                )}
-              </p>
-              <label>
-                {t("Văn bản chứng từ")}
-                <textarea
-                  autoFocus
-                  rows={14}
-                  required
-                  value={modalText}
-                  onChange={(e) => setModalText(e.target.value)}
-                  placeholder={t("Dán hoặc nhập văn bản từ chứng từ…")}
-                />
-              </label>
             </>
           ) : (
             <>

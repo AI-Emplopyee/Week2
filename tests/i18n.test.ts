@@ -15,11 +15,12 @@ import {
   translateSystemText,
 } from "../lib/i18n-core.ts";
 import {
-  applyAction,
   createEmptyWorkspace,
   getIssues,
   FIELD_DEFINITIONS,
 } from "../lib/engine.ts";
+import { applyFixtureAction as applyAction } from './helpers/kimi-fixtures.ts';
+import { syntheticShipments } from '../lib/demo.ts';
 import type { AuditEntry, Issue } from "../lib/types.ts";
 
 const actor = {
@@ -66,6 +67,30 @@ test("parameters keep evidence, punctuation and placeholder-like source text unc
   assert.equal(translated, `Compared against ${filename}, page 3: ${source}`);
   assert.equal(translate("en", " Chứng từ "), " Documents ");
   assert.equal(translate("en", "UNKNOWN CLIENT VALUE"), "UNKNOWN CLIENT VALUE");
+});
+
+test('ECUS optional evidence questions translate each problem and preserve goods row identity and evidence', () => {
+  for (const problem of ['conflict', 'invalid', 'uncertain'] as const) {
+    const issue: Issue = {
+      id: `case-ecus:ecus-evidence:["vatTaxAmount","goods-2"]:${problem}`,
+      caseId: 'case-ecus', kind: 'declaration', severity: 'error',
+      title: 'Vui lòng làm rõ Tiền thuế VAT — dòng hàng 2',
+      description: 'Các nguồn cung cấp dữ liệu cần đối chiếu.',
+      field: 'ecus.vatTaxAmount', ecusFieldKey: 'vatTaxAmount', goodsLineId: 'goods-2',
+      candidateIds: ['candidate-original'], documentIds: ['source-original'], resolved: false,
+      fingerprint: 'original-source-fingerprint',
+    };
+    const before = JSON.stringify(issue);
+    const translated = translateIssue(issue, 'en');
+    assert.match(translated.title, /Please clarify Goods list · VAT amount — goods row 2/);
+    assert.ok(!vietnamese.test(translated.description));
+    assert.match(translated.description, problem === 'conflict' ? /different values/ : problem === 'invalid' ? /format or supporting evidence/ : /could not be read clearly/);
+    assert.strictEqual(translated.candidateIds, issue.candidateIds);
+    assert.strictEqual(translated.documentIds, issue.documentIds);
+    assert.equal(translated.goodsLineId, 'goods-2');
+    assert.strictEqual(translateIssue(issue, 'vi'), issue);
+    assert.equal(JSON.stringify(issue), before);
+  }
 });
 
 test("dynamic generated issues translate labels while leaving source facts and resolutions intact", () => {
@@ -119,7 +144,7 @@ test("dynamic generated issues translate labels while leaving source facts and r
 test("all issue messages produced by the synthetic regression sets have English presentation", () => {
   const state = applyAction(
     createEmptyWorkspace("i18n-test"),
-    { type: "seed_demo" },
+    { type: "intake", documents: syntheticShipments().flatMap(shipment => shipment.documents) },
     actor,
   );
   const original = JSON.stringify(state);

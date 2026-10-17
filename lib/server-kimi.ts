@@ -31,10 +31,10 @@ export async function requestKimiExtraction(request: Request) {
     if (isVisualDocument(document) && pages.some(page => !references.some(image => image.page === page.page))) throw new ApiError(422, 'Render every selected PDF or image page before vision extraction.');
     const images = await loadVisionPages(context.state.id, document, references);
     if (!await consumeRateLimit(context.db, `kimi-extract:${context.state.id}`, KIMI_LIMITS.requestsPerMinute, 60)) throw new ApiError(429, 'This workspace has reached the Kimi request limit. Wait one minute before trying again.');
-    const result = await extractWithKimi(config, document, pages.map(page => page.page), { images });
+    const result = await extractWithKimi(config, document, pages.map(page => page.page), { images, beforeRepair: () => consumeRateLimit(context.db, `kimi-extract:${context.state.id}`, KIMI_LIMITS.requestsPerMinute, 60) });
     const before = context.state.candidates.length;
     const saved = await mutate(context, input.revision, { type: 'add_ai_candidates', caseId: shipment.id, documentId: document.id, documentVersion: document.version, model: result.model, pages: result.pages, proposals: result.proposals, pageReadings: result.pageReadings, visionEvidence: images.map(({ page, imageSha256, width, height }) => ({ page, imageSha256, width, height })) });
-    return { ...saved, ai: { added: saved.state.candidates.length - before, rejected: result.rejected, model: result.model, documentId: document.id, pages: result.pages } };
+    return { ...saved, ai: { added: saved.state.candidates.length - before, rejected: result.rejected, rejectionDiagnostics: result.rejectionDiagnostics, model: result.model, documentId: document.id, pages: result.pages, ...(result.formatRepair ? { formatRepair: result.formatRepair } : {}) } };
   } catch (error) {
     if (error instanceof KimiError) throw new ApiError(error.status, error.message);
     throw error;

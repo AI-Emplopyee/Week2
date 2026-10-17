@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { enrichIntakeWithKimi } from '../lib/intake-ai.ts';
 import { parseIntakeMetadata } from '../lib/intake-metadata.ts';
-import { groundKimiProposals } from '../lib/kimi.ts';
+import { extractWithKimi, groundKimiProposals } from '../lib/kimi.ts';
 import type { UploadedDocument, ShipmentDocument } from '../lib/types.ts';
 const document = (id: string, count = 1): UploadedDocument => ({ id, name: `${id}.pdf`, mime: 'application/pdf', size: 100, sha256: id, extractionStatus: 'extracted', pages: Array.from({ length: count }, (_, i) => ({ page: i + 1, text: `Invoice No: ${id}-${i + 1}`, textSource: 'pdf_text' })) });
 const config = { apiKey: 'synthetic-key-not-real', model: 'synthetic-model' };
@@ -36,6 +36,29 @@ test('AI provider failure preserves originals and never retries or exposes provi
   await enrichIntakeWithKimi(docs, config, { extract: async () => { calls++; throw new Error('private-provider-payload'); } });
   assert.equal(calls, 1); assert.equal(docs[0].aiStatus, 'failed'); assert.equal(docs[0].pages.length, 8);
   assert.ok(!JSON.stringify(docs).includes('private-provider-payload'));
+});
+
+test('format repairs consume both intake and shared provider budgets before another document can start', async () => {
+  for (const [maxRequests, sharedAllowsRepair] of [[2, true], [1, true], [2, false]] as const) {
+    const docs = [document('one'), document('two')];
+    let providerCalls = 0; let budgetChecks = 0;
+    await enrichIntakeWithKimi(docs, config, {
+      maxRequests,
+      allowRequest: async () => { budgetChecks++; return budgetChecks === 1 || sharedAllowsRepair; },
+      extract: (configuration, source, pages, dependencies) => extractWithKimi(configuration, source, pages, { ...dependencies, fetch: async () => {
+        providerCalls++;
+        const candidate = { field: 'invoiceNumber', value: 'one-1', quote: 'Invoice No: one-1', page: 1, confidence: 'high', readability: 'clear', ...(providerCalls === 1 ? { bounds: null } : {}) };
+        return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ candidates: [candidate] }) } }] });
+      } }),
+    });
+    const repaired = maxRequests === 2 && sharedAllowsRepair;
+    assert.equal(providerCalls, repaired ? 2 : 1);
+    assert.equal(budgetChecks, maxRequests === 2 ? 2 : 1);
+    assert.equal(docs[0].aiStatus, repaired ? 'completed' : 'failed');
+    assert.equal(docs[0].aiCandidates?.length ?? 0, repaired ? 1 : 0);
+    assert.equal(docs[1].aiStatus, 'partial');
+    assert.equal(docs[1].aiCandidates, undefined);
+  }
 });
 
 test('AI goods are literal row-scoped proposals; header/row confusion and invented cells are rejected', () => {

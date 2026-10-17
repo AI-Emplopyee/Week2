@@ -30,7 +30,8 @@ const candidate: Candidate = {
   originalText: "Gross weight: 10 KG",
   page: 1,
   location: "text",
-  method: "ocr",
+  method: "kimi:test_fixture",
+  readability: "clear",
   confidence: "medium",
   normalizations: [],
 };
@@ -45,7 +46,7 @@ const document: ShipmentDocument = {
   version: 1,
   active: true,
   uploadedAt: "",
-  pages: [{ page: 1, text: "Gross weight: 10 KG" }],
+  pages: [{ page: 1, text: "Gross weight: 10 KG", aiReadability: "clear" }],
   extractionStatus: "extracted",
   synthetic: true,
 };
@@ -87,6 +88,29 @@ test("conflicting evidence asks for a choice and preserves source quotes", () =>
   assert.equal(question.kind, "choose");
   assert.deepEqual(question.values, ["10", "12"]);
   assert.equal(question.candidates[1].originalText, "Gross weight: 12 KG");
+});
+
+test("review summaries keep corroborated party spacing variants in one choice", () => {
+  const state = fixture();
+  state.cases.push({ id: "shipment", reference: "SYNTHETIC", title: "Synthetic", status: "review", caseType: "import",
+    assignedTo: "", createdAt: "", updatedAt: "", documentIds: ["invoice", "certificate"], fields: {}, goods: [],
+    groupingConfidence: "high", groupingReason: "Synthetic fixture", groupingConfirmed: true, synthetic: true, resolutions: [] });
+  state.documents = ["invoice", "certificate"].map((id) => ({ ...structuredClone(document), id, sha256: id,
+    type: id === "invoice" ? "invoice" : "certificate_of_origin", extractionPipeline: "kimi", aiProcessedPages: [1],
+    pages: [{ page: 1, text: `${id === "invoice" ? "DEMO BUYER CO., LTD." : "DEMOBUYER CO., LTD."}\n1 DEMO STREET`, aiReadability: "clear" }] }));
+  state.candidates = state.documents.flatMap((doc) => [
+    { ...candidate, id: `${doc.id}-name`, documentId: doc.id, field: "importer", confidence: "high" as const,
+      value: doc.id === "invoice" ? "DEMO BUYER CO., LTD." : "DEMOBUYER CO., LTD.",
+      originalText: doc.id === "invoice" ? "DEMO BUYER CO., LTD." : "DEMOBUYER CO., LTD." },
+    { ...candidate, id: `${doc.id}-address`, documentId: doc.id, field: "importerAddress", confidence: "high" as const,
+      value: "1 DEMO STREET", originalText: "1 DEMO STREET" },
+  ]);
+  const source = structuredClone(state.candidates);
+  const question = reviewQuestion(state, { ...issue, field: "importer", kind: "stale", candidateIds: ["invoice-name", "certificate-name"] });
+  assert.equal(question.kind, "confirm");
+  assert.equal(question.values.length, 1);
+  assert.deepEqual(question.candidates.map(value => value.value), ["DEMO BUYER CO., LTD.", "DEMOBUYER CO., LTD."]);
+  assert.deepEqual(state.candidates, source);
 });
 
 test("replaced, moved and cross-shipment evidence cannot be confirmed", () => {

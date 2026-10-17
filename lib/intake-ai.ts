@@ -30,7 +30,12 @@ export async function enrichIntakeWithKimi(documents: UploadedDocument[], config
       remaining--;
       const document: ShipmentDocument = { ...plan.document, caseId: '', type: 'other', version: 1, active: true, uploadedAt: new Date().toISOString(), synthetic: !!plan.document.synthetic };
       try {
-        const result = await (dependencies.extract ?? extractWithKimi)(config, document, pages);
+        const result = await (dependencies.extract ?? extractWithKimi)(config, document, pages, { beforeRepair: async () => {
+          if (remaining <= 0) return false;
+          if (dependencies.allowRequest && !await dependencies.allowRequest()) { remaining = 0; return false; }
+          remaining--;
+          return true;
+        } });
         plan.document.aiCandidates = [...(plan.document.aiCandidates ?? []), ...result.candidates];
         plan.document.aiProcessedPages = [...new Set([...(plan.document.aiProcessedPages ?? []), ...result.pages])];
         plan.document.aiPageReadings = [...(plan.document.aiPageReadings ?? []).filter(page => !result.pages.includes(page.page)), ...(result.pageReadings ?? [])];

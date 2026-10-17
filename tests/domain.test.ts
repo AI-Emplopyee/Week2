@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyAction, createEmptyWorkspace, getIssues, getProposedFields } from '../lib/engine.ts';
-import { classifyDocument, extractDocument, normalizeValue } from '../lib/extraction.ts';
+import { createEmptyWorkspace, getIssues, getProposedFields } from '../lib/engine.ts';
+import { applyFixtureAction as applyAction } from './helpers/kimi-fixtures.ts';
+import { classifyDocument, extractDocument, normalizeValue } from './helpers/legacy-extraction.ts';
 import { syntheticShipments } from '../lib/demo.ts';
 import { assessCustomsRules, CUSTOMS_RULES, decisionsAffectedByRuleChange } from '../lib/rules.ts';
 import type { Actor, Action, ShipmentDocument, UploadedDocument, WorkspaceState } from '../lib/types.ts';
+import { completeRequiredEcusFixture } from './ecus-fixtures.ts';
 
 const actor: Actor = { id: 'reviewer-1', name: 'Người rà soát Demo', email: 'reviewer@example.invalid' };
 const empty = () => createEmptyWorkspace('workspace-test');
@@ -18,10 +20,12 @@ function ready() {
     const candidate = s.candidates.find(x => x.caseId === c.id && !x.lineId && x.field === field && x.value === value)!;
     s = act(s, { type: 'review_field', caseId: c.id, field, value, candidateId: candidate.id, reason: 'Đã kiểm tra chứng từ và đơn vị kg.' });
   }
+  const netWeight = s.candidates.find(candidate => candidate.field === 'netWeight')!;
+  s = act(s, { type: 'review_field', caseId: c.id, field: 'netWeight', value: netWeight.value, candidateId: netWeight.id, reason: 'Synthetic reviewer explicitly checked the single medium-confidence reading.' });
   s = act(s, { type: 'review_goods', caseId: c.id, goods: s.cases[0].goods, reviewedLineIds: s.cases[0].goods.map(line => line.id), reason: 'Đối chiếu số lượng và trị giá với nguồn.' });
   // This synthetic fixture supplies a manually confirmed gross-weight unit instruction.
   s = act(s, { type: 'save_declaration_field', caseId: c.id, fieldId: '1.28', applicability: 'applicable', basis: 'Synthetic gross weight instruction.', value: { kind: 'quantity', amount: '630', unitCode: 'KG' }, provenance: [{ kind: 'manual', note: 'Synthetic broker confirms the unit; code remains unverified.' }], reason: 'Synthetic manual unit confirmation.', review: true });
-  return s;
+  return completeRequiredEcusFixture(s, c.id, actor);
 }
 
 test('workspace starts empty, demo requires an explicit action and all demo docs are synthetic', () => {
@@ -74,14 +78,14 @@ test('duplicate attachments and emails are skipped and original metadata retaine
 
 test('conflicting headers are never silently proposed and require documented selection', () => {
   const a = upload('a', 'COMMERCIAL INVOICE\nInvoice Number: INV1\nImporter: Synthetic Buyer\nInvoice Total: 100');
-  const b = upload('b', 'PACKING LIST\nInvoice Number: INV1\nImporter: Synthetic Buyer\nInvoice Total: 200');
+  const b = upload('b', 'COMMERCIAL INVOICE\nInvoice Number: INV1\nImporter: Synthetic Buyer\nInvoice Total: 200');
   let s = act(empty(), { type: 'intake', documents: [a, b] }); const id = s.cases[0].id;
   assert.equal(getProposedFields(s, id).invoiceTotal, undefined);
   const issue = getIssues(s, id).find(i => i.field === 'invoiceTotal' && i.kind === 'conflict')!; assert.equal(issue.candidateIds.length, 2);
   const candidate = s.candidates.find(c => c.field === 'invoiceTotal')!;
   assert.throws(() => act(s, { type: 'review_field', caseId: id, field: 'invoiceTotal', value: candidate.value, candidateId: candidate.id, reason: '' }));
   assert.throws(() => act(s, { type: 'resolve_issue', caseId: id, issueId: issue.id, reason: 'ignore' }));
-  s = act(s, { type: 'review_field', caseId: id, field: 'invoiceTotal', value: candidate.value, candidateId: candidate.id, reason: 'Confirmed invoice is correct; packing list total is not an invoice total.' });
+  s = act(s, { type: 'review_field', caseId: id, field: 'invoiceTotal', value: candidate.value, candidateId: candidate.id, reason: 'Confirmed the correct invoice amount with the supplier.' });
   assert.equal(getProposedFields(s, id).invoiceTotal, '100'); assert.ok(getIssues(s, id).find(i => i.id === issue.id)!.resolved);
 });
 
@@ -91,14 +95,14 @@ test('candidate selection is constrained to active case, field and document vers
   assert.throws(() => act(s, { type: 'review_field', caseId: c.id, field: 'invoiceNumber', value: 'override', reason: '' }));
 });
 
-test('quantity conflicts, total arithmetic and weights produce factual issues', () => {
+test('quantity conflicts and arithmetic produce factual issues; unitless manual weights are not compared', () => {
   const s = act(empty(), { type: 'intake', documents: syntheticShipments()[0].documents });
   assert.ok(getIssues(s).some(i => i.kind === 'conflict' && i.title.includes('quantity')));
   assert.ok(getIssues(s).some(i => i.kind === 'conflict' && i.field === 'packageCount'));
   let r = ready(); const id = r.cases[0].id;
   r = act(r, { type: 'review_field', caseId: id, field: 'invoiceTotal', value: '9000', reason: 'Manual test override.' });
   r = act(r, { type: 'review_field', caseId: id, field: 'netWeight', value: '1000', reason: 'Manual test override.' });
-  assert.ok(getIssues(r).some(i => i.title.includes('Tổng dòng'))); assert.ok(getIssues(r).some(i => i.title.includes('Trọng lượng tịnh lớn')));
+  assert.ok(getIssues(r).some(i => i.title.includes('Tổng dòng'))); assert.equal(getIssues(r).some(i => i.title.includes('Trọng lượng tịnh lớn')), false);
 });
 
 test('manual customs decisions are explicit, unverified and require a reason', () => {
@@ -145,14 +149,17 @@ test('replacement retains originals and historical candidates, stales prior deci
   assert.throws(() => act(s, { type: 'approve', caseId: id }));
 });
 
-test('transcription merges pages, preserves original content and persistent manual provenance', () => {
+test('transcription preserves source pages and waits for a new Kimi reading', () => {
   const doc = { ...upload('partial', 'COMMERCIAL INVOICE\nInvoice Number: PARTIAL1', 'invoice.pdf'), mime: 'application/pdf', pages: [{ page: 1, text: 'COMMERCIAL INVOICE\nInvoice Number: PARTIAL1' }, { page: 2, text: '' }], extractionStatus: 'needs_transcription' as const };
   let s = act(empty(), { type: 'intake', documents: [doc] });
   s = act(s, { type: 'transcribe_document', documentId: doc.id, pages: [{ page: 2, text: 'Invoice Total: 123.00' }], reason: 'Human transcribed second page.' });
   assert.equal(s.documents[0].pages.length, 2); assert.equal(s.documents[0].pages[0].text, doc.pages[0].text);
-  let manual = s.candidates.find(c => c.documentId === doc.id && c.documentVersion === 2 && c.field === 'invoiceTotal')!; assert.match(manual.method, /manual_transcription/); assert.equal(manual.confidence, 'low');
+  assert.equal(s.candidates.some(c => c.documentId === doc.id && c.documentVersion === 2), false);
+  assert.equal(s.documents[0].pages[1].textSource, 'manual');
+  assert.equal(s.documents[0].extractionStatus, 'pending_ai');
   s = act(s, { type: 'intake', documents: [upload('extra', 'PACKING LIST\nInvoice Number: PARTIAL1')], targetCaseId: s.cases[0].id });
-  manual = s.candidates.find(c => c.documentId === doc.id && c.documentVersion === 2 && c.field === 'invoiceTotal')!; assert.match(manual.method, /manual_transcription/); assert.equal(manual.confidence, 'low');
+  assert.equal(s.candidates.some(c => c.documentId === doc.id && c.documentVersion === 2), false);
+  assert.equal(s.documents.find(d => d.id === doc.id)!.extractionStatus, 'pending_ai');
 });
 
 test('move and merge invalidate source/target reviews and preserve snapshots', () => {
@@ -178,9 +185,9 @@ test('rules remain empty and cannot advertise assessed customs compliance', () =
   assert.equal(CUSTOMS_RULES.length, 0); assert.equal(assessCustomsRules().status, 'Not yet assessed'); assert.equal(assessCustomsRules().rulesEvaluated, 0); assert.deepEqual(decisionsAffectedByRuleChange([], []), []);
 });
 
-test('explicit Other classification clears uncertainty while retaining the supplemental source', () => {
+test('explicit Other classification preserves the source and requires a fresh Kimi reading', () => {
   let s = act(empty(), { type: 'intake', documents: [upload('supplement', 'SUPPLIER MEMO\nInvoice Number: EXTRA-1')] });
-  assert.ok(getIssues(s).some(i => i.id.includes('classification-')));
+  assert.equal(getIssues(s).some(i => i.id.includes('classification-')), false);
   s = act(s, { type: 'classify_document', documentId: 'supplement', documentType: 'other' });
   assert.equal(s.documents[0].type, 'other'); assert.equal(s.documents[0].classificationConfirmed, true);
   assert.equal(getIssues(s).some(i => i.id.includes('classification-')), false);
@@ -190,7 +197,7 @@ test('partial transcription leaves remaining blank pages as actionable blockers'
   const scan = { ...upload('scan', '', 'scan-invoice.pdf'), pages: [{ page: 1, text: '' }, { page: 2, text: '' }], extractionStatus: 'needs_transcription' as const };
   let s = act(empty(), { type: 'intake', documents: [scan] });
   s = act(s, { type: 'transcribe_document', documentId: scan.id, pages: [{ page: 1, text: 'Invoice Number: SCAN1' }], reason: 'Only page one transcribed.' });
-  assert.equal(s.documents[0].pages.length, 2); assert.equal(s.documents[0].extractionStatus, 'needs_transcription');
+  assert.equal(s.documents[0].pages.length, 2); assert.equal(s.documents[0].extractionStatus, 'pending_ai');
   assert.ok(getIssues(s).some(i => i.kind === 'document' && i.documentIds.includes(scan.id)));
 });
 
@@ -206,14 +213,14 @@ test('transcribing one page cannot clear weak OCR on another page', () => {
   let s = act(createEmptyWorkspace('weak-ocr'), { type: 'intake', documents: [document] });
   assert.ok(getIssues(s).some(issue => issue.kind === 'document' && issue.documentIds.includes(document.id)));
   s = act(s, { type: 'transcribe_document', documentId: document.id, pages: [{ page: 1, text: 'COMMERCIAL INVOICE\nInvoice Number: DEMO-WEAK' }], reason: 'Checked and transcribed only the first source page.' });
-  assert.equal(s.documents[0].extractionStatus, 'needs_transcription');
-  assert.match(s.documents[0].extractionError!, /^Trang 2 /);
+  assert.equal(s.documents[0].extractionStatus, 'pending_ai');
+  assert.ok(s.documents[0].pages.every(page => !page.aiReadability));
   assert.equal(s.documents[0].pages[0].ocrConfidence, undefined);
   assert.equal(s.documents[0].pages[1].ocrConfidence, 0.41);
   s = act(s, { type: 'transcribe_document', documentId: document.id, pages: [{ page: 2, text: 'PACKING LIST\nPackages: 3' }], reason: 'Checked and transcribed the remaining source page.' });
-  assert.equal(s.documents[0].extractionStatus, 'extracted');
-  assert.equal(s.documents[0].extractionError, undefined);
-  assert.equal(getIssues(s).some(issue => issue.kind === 'document' && issue.documentIds.includes(document.id)), false);
+  assert.equal(s.documents[0].extractionStatus, 'pending_ai');
+  assert.equal(s.candidates.some(candidate => candidate.documentVersion === s.documents[0].version), false);
+  assert.ok(getIssues(s).some(issue => issue.kind === 'document' && issue.documentIds.includes(document.id)));
 });
 
 test('manual numeric and date ambiguity cannot be approved as a clear source fact', () => {

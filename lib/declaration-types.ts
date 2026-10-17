@@ -3,7 +3,7 @@ import type { Actor, Candidate, GoodsLine, ShipmentDocument } from './types.ts';
 export type DeclarationApplicability = 'unresolved' | 'applicable' | 'not_applicable';
 export type DeclarationProvenance =
   | { kind: 'manual'; note: string }
-  | { kind: 'document'; documentId: string; documentVersion: number; page: number; quote: string; visualEvidence?: { candidateId: string; imageSha256: string; bounds: [number, number, number, number]; textAgreement: boolean } };
+  | { kind: 'document'; documentId: string; documentVersion: number; page: number; quote: string; candidateId?: string; /** Original model estimate, not a calculated or calibrated probability. */ confidenceScore?: number; visualEvidence?: { candidateId: string; imageSha256: string; bounds: [number, number, number, number]; textAgreement: boolean } };
 export type DeclarationValue =
   | { kind: 'text'; text: string }
   | { kind: 'code'; code: string }

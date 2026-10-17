@@ -9,6 +9,7 @@ import { fetchWithSession } from "@/lib/auth-client";
 import { CASE_TYPE_LABELS, caseScopeMessage } from "@/lib/case-scope";
 import { clearSavedGoodsDraft } from "@/lib/client-drafts";
 import { prepareIntakeFile } from "@/lib/client-intake";
+import { runCaseKimi } from "@/lib/client-case-automation";
 import { AiPipelineError, buildAiBatches, canRenderVisionDocument, runDocumentAi, type ClientAiStatus } from "@/lib/client-vision";
 import { declarationEntryKey } from "@/lib/declaration";
 import {
@@ -20,7 +21,7 @@ import { translateIssue, translateSystemText } from "@/lib/i18n-core";
 import { downloadReport } from "@/lib/report";
 import { actionableReviewIssues } from "@/lib/review-questions";
 import { getReviewHistory } from "@/lib/review-history";
-import type { Candidate, GoodsLine, Issue, ShipmentCase } from "@/lib/types";
+import type { Candidate, GoodsLine, Issue, ShipmentCase, ShipmentDocument, WorkspaceResponse } from "@/lib/types";
 import {
   AlertCircle,
   AlertTriangle,
@@ -79,6 +80,10 @@ import {
   useWorkspaceSession,
   type ApiResponse,
 } from "@/hooks/use-workspace-session";
+
+import { sourcePageNeedsKimi } from '@/lib/source-completeness';
+
+const needsKimi = (workspace: WorkspaceResponse, document: ShipmentDocument) => !document.referenceOnly && !['unsupported', 'failed'].includes(document.extractionStatus) && document.pages.some(page => sourcePageNeedsKimi(workspace.state, document, page));
 
 export default function WorkspaceApp() {
   return (
@@ -162,6 +167,7 @@ function Workspace() {
   const [uploadLabel, setUploadLabel] = useState("");
   const [extractionCancelable, setExtractionCancelable] = useState(false);
   const uploadAbort = useRef<AbortController | null>(null);
+  const automaticCases = useRef(new Set<string>());
   const uploadInput = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
   const replaceId = useRef("");
@@ -271,7 +277,7 @@ function Workspace() {
           const skipped: string[] = [];
           for (const document of visualDocuments) {
             try {
-              const remaining = document.pages.filter(page => !(document.aiProcessedPages || []).includes(page.page)).map(page => page.page);
+              const remaining = document.pages.filter(page => sourcePageNeedsKimi(workspace.state, document, page)).map(page => page.page);
               if (!remaining.length && document.pages.length) continue;
               queue.push({ documentId: document.id, batches: buildAiBatches(document.pages, remaining, status.limits, true) });
             } catch (error) { skipped.push(`${document.name}: ${translateSystemText(errorMessage(error), locale)}`); }
@@ -494,7 +500,6 @@ function Workspace() {
       ? getReviewHistory(state, current.id, data?.issues || [])
       : [];
   const documents = state && current ? activeDocs(state, current.id) : [];
-  const source = documents.find((d) => d.id === docId) || documents[0];
   const currentCandidates =
     state?.candidates.filter(
       (c) =>
@@ -522,7 +527,8 @@ function Workspace() {
       (draft) =>
         draft.caseId === current.id &&
         !!emailDraftEdits[draft.id] &&
-        (emailDraftEdits[draft.id].subject !== draft.subject ||
+        (emailDraftEdits[draft.id].recipient !== draft.recipient ||
+          emailDraftEdits[draft.id].subject !== draft.subject ||
           emailDraftEdits[draft.id].body !== draft.body),
     );
   const hasAnyPendingDrafts =
@@ -541,6 +547,50 @@ function Workspace() {
   }, [hasAnyPendingDrafts, busy]);
   const liveCases =
     state?.cases.filter((c) => !c.mergedInto && c.status !== "completed") || [];
+  const automaticDraft = state?.emailDrafts?.find(draft => draft.caseId === current?.id && draft.automation && draft.automation.state !== 'resolved');
+  const unreadOriginals = !!data && documents.some(document => needsKimi(data, document));
+  const automationKey = current?.status === 'review' && current.caseType === 'import'
+    ? `${current.id}:${documents.map(document => `${document.id}:${document.version}`).sort().join('|')}` : '';
+  useEffect(() => {
+    if (!automationKey || busy || hasAnyPendingDrafts || conflictRef.current || automaticCases.current.has(automationKey)) return;
+    const initial = stateRef.current;
+    if (!initial || !selectedId) return;
+    automaticCases.current.add(automationKey);
+    const caseId = selectedId;
+    const controller = new AbortController();
+    uploadAbort.current = controller;
+    setBusy(true);
+    void (async () => {
+      try {
+        const saved = await mutation({ type: 'refresh_case_automation', caseId, locale });
+        const refreshed = stateRef.current;
+        if (!saved || !refreshed) return;
+        setBusy(true);
+        const pending = refreshed.state.documents.some(document => document.caseId === caseId && document.active && needsKimi(refreshed, document));
+        if (!pending) return;
+        const response = await fetchWithSession('/api/ai/status');
+        const status = await response.json() as ClientAiStatus & { error?: string };
+        if (!response.ok) throw new Error(status.error || 'Kimi status could not be loaded.');
+        if (!status.configured) {
+          setError(locale === 'vi' ? 'Bản gốc đang chờ Kimi. Cần cấu hình khóa Kimi trên máy chủ để ứng dụng tự đọc và điền biểu mẫu.' : 'Originals are waiting for Kimi. Configure the server Kimi key to read and fill the forms automatically.');
+          return;
+        }
+        setExtractionCancelable(true);
+        await runCaseKimi({ workspace: refreshed, caseId, status, signal: controller.signal,
+          onWorkspace: response => { install(response); setError(""); },
+          onProgress: progress => setUploadLabel(`${progress.stage === 'rendering' ? (locale === 'vi' ? 'Chuẩn bị ảnh trang' : 'Preparing page image') : (locale === 'vi' ? 'Kimi đang đọc' : 'Kimi is reading')} · ${progress.documentName} · ${progress.page}`),
+        });
+      } catch (error) {
+        if (error instanceof AiPipelineError && error.workspace) install(error.workspace);
+        if (!controller.signal.aborted) setError(errorMessage(error));
+      } finally {
+        uploadAbort.current = null;
+        setExtractionCancelable(false);
+        setUploadLabel('');
+        setBusy(false);
+      }
+    })();
+  }, [automationKey, busy, hasAnyPendingDrafts, selectedId, locale, conflictRef, install, mutation, setBusy, setError, stateRef]);
 
   const documentPanel =
     state && current ? (
@@ -561,9 +611,6 @@ function Workspace() {
         mutation={mutation}
         onUpload={() => uploadInput.current?.click()}
         onGroup={() => showModal("group")}
-        onTranscribe={(text) => {
-          setModal({ kind: "transcribe", initialText: text });
-        }}
         onReplace={(id) => {
           replaceId.current = id;
           replaceInput.current?.click();
@@ -571,6 +618,7 @@ function Workspace() {
         onBusyChange={setBusy}
         onApplied={(response, message) => {
           install(response);
+          setError("");
           setToast(message);
         }}
         onConflict={(response) => {
@@ -607,9 +655,9 @@ function Workspace() {
           if (tab === "declaration") setShipmentTab("documents");
         }}
         onDeclaration={(issue) => {
-          setDeclarationFocus(issue.field);
+          setDeclarationFocus(issue.ecusFieldKey || issue.field);
           setDeclarationGoodsFocus(
-            current.declarationDraft?.fields.find(
+            issue.goodsLineId || current.declarationDraft?.fields.find(
               (entry) =>
                 entry.fieldId === issue.field &&
                 issue.id.includes(
@@ -838,6 +886,10 @@ function Workspace() {
                     ? t(currentScope.title)
                     : current.status === "completed"
                     ? t("Hồ sơ đã được lưu trữ")
+                    : unreadOriginals
+                      ? (locale === 'vi' ? 'Kimi đang chuẩn bị dữ liệu từ bản gốc' : 'Kimi original-document processing')
+                    : automaticDraft && !automaticDraft.approval
+                      ? (locale === 'vi' ? 'Email bổ sung thông tin đang chờ bạn duyệt' : 'Information-request email awaiting your approval')
                     : caseIssues.length
                       ? t("{p0} vấn đề cần bạn rà soát", {
                           p0: caseIssues.length,
@@ -853,6 +905,10 @@ function Workspace() {
                     ? t(currentScope.description)
                     : current.status === "completed"
                     ? t("Mở lại hồ sơ khi cần sửa đổi hoặc bổ sung.")
+                    : unreadOriginals
+                      ? (locale === 'vi' ? 'Ứng dụng đọc các trang bằng Kimi, áp dụng hướng dẫn và điền biểu mẫu trước khi hỏi thông tin còn thiếu.' : 'The app reads pages with Kimi, applies the guide and fills the forms before requesting missing information.')
+                    : automaticDraft && !automaticDraft.approval
+                      ? (locale === 'vi' ? `Đã tổng hợp ${automaticDraft.automation?.questionCount || 0} thông tin cần bổ sung trong mục Tin nhắn. Email chưa được gửi.` : `${automaticDraft.automation?.questionCount || 0} outstanding details are grouped in Messages. The email has not been sent.`)
                     : caseIssues.length
                       ? t(
                           "Đối chiếu dữ kiện chứng từ và hàng hóa trong Rà soát & bản khai trước khi duyệt.",
@@ -937,6 +993,12 @@ function Workspace() {
           )}
           {shipmentTab === "messages" ? (
             <ShipmentMessages
+              onReviewClientMemory={(fieldKey) => {
+                setShipmentTab("review");
+                setReviewTab("declaration");
+                setDeclarationFocus(fieldKey);
+                setDeclarationGoodsFocus(undefined);
+              }}
               key={current.id}
               state={state}
               shipment={current}
@@ -951,6 +1013,7 @@ function Workspace() {
                   const current = previous[id];
                   if (
                     !current ||
+                    current.recipient !== submitted.recipient ||
                     current.subject !== submitted.subject ||
                     current.body !== submitted.body
                   )
@@ -975,9 +1038,10 @@ function Workspace() {
                 <>
                   {current.caseType === "import" && (pendingQuestions.length > 0 ||
                     completedQuestions.length > 0) && (
-                    <div className="shipment-question-section">
+                    <details className="shipment-question-section ecus-review-questions">
+                      <summary>{t("Cần rà soát ")}<span className="issue-count">{pendingQuestions.length}</span></summary>
                       {questionsPanel}
-                    </div>
+                    </details>
                   )}
                   <DeclarationDraftEditor
                     key={`${current.id}:${declarationFocus || ""}:${declarationGoodsFocus || ""}`}
@@ -1222,7 +1286,7 @@ function Workspace() {
         <WorkspaceSettings data={data!} busy={busy} mutation={mutation} />
       ) : (
         <>
-        <EmailShipmentMatches state={state} disabled={busy || !!conflict} onBusyChange={setBusy} onApplied={(response, message) => { install(response); setToast(message); }} onConflict={response => { conflictRef.current = true; setConflict(response); }} mutation={mutation} onOpen={openCase} onUpload={() => uploadInput.current?.click()} />
+        <EmailShipmentMatches state={state} disabled={busy || !!conflict} onBusyChange={setBusy} onApplied={(response, message) => { install(response); setError(""); setToast(message); }} onConflict={response => { conflictRef.current = true; setConflict(response); }} mutation={mutation} onOpen={openCase} onUpload={() => uploadInput.current?.click()} />
         <ShipmentList
           query={shipmentQuery}
           filter={shipmentFilter}
@@ -1314,8 +1378,6 @@ function Workspace() {
           issues={data.issues}
           actor={data.actor}
           shipment={current}
-          source={source}
-          page={page}
           localMode={localMode}
           busy={busy || !!conflict}
           selectedDocuments={selectedDocs}

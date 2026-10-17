@@ -1,6 +1,6 @@
 import type { WorkspaceState } from './types.ts';
 import { getIssues } from './engine.ts';
-import { DECLARATION_CATALOG } from './declaration-catalog.ts';
+import { DECLARATION_FIELDS } from './declaration-catalog.ts';
 import { migrateDeclarationDraft } from './declaration.ts';
 
 export function buildReport(state: WorkspaceState, caseId: string) {
@@ -14,7 +14,7 @@ export function buildReport(state: WorkspaceState, caseId: string) {
   const handoffs = state.handoffs.filter(h => h.caseId === caseId);
   const snapshots = state.snapshots.filter(s => s.caseId === caseId);
   const declarationDraft = migrateDeclarationDraft(shipment.declarationDraft);
-  const declarationCoverage = DECLARATION_CATALOG.map(field => ({ field, entries: declarationDraft.fields.filter(entry => entry.fieldId === field.id) }));
+  const declarationCoverage = DECLARATION_FIELDS.map(field => ({ field, entries: declarationDraft.fields.filter(entry => entry.fieldId === field.id) }));
   return { shipment, documents, candidates, issues, open, handoffs, snapshots,
     declarationDraft, declarationCoverage,
     audit: state.audit.filter(a => a.caseId === caseId),

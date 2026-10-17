@@ -179,7 +179,7 @@ export async function planEmailShipmentMatches(config: KimiConfig, state: Worksp
   const timeoutMs = Math.max(1, Math.min(dependencies.timeoutMs ?? EMAIL_SHIPMENT_AI_LIMITS.timeoutMs, EMAIL_SHIPMENT_AI_LIMITS.timeoutMs));
   const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new KimiError(504, 'Kimi email matching timed out. No email links were saved; there was no automatic retry.')); }, timeoutMs); });
   const operation = async () => {
-    const response = await (dependencies.fetch ?? fetch)(`${KIMI_ENDPOINT}/chat/completions`, { method: 'POST', redirect: 'error', headers: { Authorization: `Bearer ${config.apiKey!.trim()}`, 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody(status.model!, context)), signal: controller.signal });
+    const response = await (dependencies.fetch ?? fetch)(`${KIMI_ENDPOINT}/chat/completions`, { method: 'POST', redirect: 'manual', headers: { Authorization: `Bearer ${config.apiKey!.trim()}`, 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody(status.model!, context)), signal: controller.signal });
     if (!response.ok) { await response.body?.cancel(); throw new KimiError(502, 'Kimi could not complete email shipment matching. No email links were saved.'); }
     let body: unknown;
     try { body = JSON.parse(await boundedResponse(response)); } catch (error) { if (error instanceof KimiError) throw error; throw new KimiError(502, 'Kimi returned invalid email matching JSON. No email links were saved.'); }

@@ -136,8 +136,10 @@ test('a reviewed link follows a manually merged case and a fresh match does not 
 test('a grounded body-only email supplies the correspondence recipient without moving attachments or sending mail', () => {
   const { state, caseIds } = fixture();
   let current = match(state);
+  current = applyAction(current, {type:'add_ai_candidates',caseId:caseIds[0],documentId:'document-0',documentVersion:1,model:'synthetic-kimi',pages:[1],proposals:[{field:'houseBillOfLading',value:'SYNTHETIC-HBL-100',quote:'HBL No: SYNTHETIC-HBL-100',page:1,confidence:'high',readability:'clear'}],pageReadings:[{page:1,documentType:'bill_of_lading',readability:'clear'}]},actor);
+  current = match(current);
   current = applyAction(current, { type: 'confirm_grouping', caseId: caseIds[0], reason: 'Synthetic source check.' }, actor);
-  const issue = getIssues(current, caseIds[0]).find(issue => issue.id.endsWith(':missing-invoice'))!;
+  const issue = getIssues(current, caseIds[0]).find(issue => issue.ecusFieldKey === 'invoiceTotal' && issue.id.endsWith(':required'))!;
   assert.ok(issue);
   const emailBefore = structuredClone(current.emails[0]);
   current = applyAction(current, { type: 'draft_questions', caseId: caseIds[0], issueIds: [issue.id], locale: 'en' }, actor);

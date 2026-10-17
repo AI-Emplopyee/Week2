@@ -34,10 +34,10 @@ test('catalog models all safe source structures, keeps deferred/customs cells bl
   assert.equal(getDeclarationField('1.86')!.tab,'goods');
 });
 
-test('empty migration invents no values or requirements and does not mutate a supplied draft or snapshot', () => {
+test('empty migration invents no values and keeps required ECUS questions without mutating supplied drafts or snapshots', () => {
   const empty = migrateDeclarationDraft();
   assert.deepEqual(empty,{schemaVersion:1,fields:[]});
-  assert.deepEqual(getDeclarationIssues(empty,context),[]);
+  assert.equal(getDeclarationIssues(empty,context).filter(issue => issue.id.endsWith(':required')).length,62);
   const original = save(undefined,action('1.13',{kind:'entity',name:'Example Buyer'}));
   const snapshot = structuredClone(original);
   const migrated = migrateDeclarationDraft(original); migrated.fields[0].basis='changed';
@@ -69,7 +69,7 @@ test('unresolved and malformed values remain editable drafts but cannot be revie
   const reviewed = save(draft,action('1.42',{kind:'date',date:'2028-02-29'}));
   assert.equal(reviewed.fields[0].review?.actorId,context.actor.id);
   assert.equal(reviewed.fields[0].updatedBy,context.actor.id);
-  assert.deepEqual(getDeclarationIssues(reviewed,context),[]);
+  assert.deepEqual(getDeclarationIssues(reviewed,context).filter(issue => !issue.id.endsWith(':required')),[]);
 });
 
 test('exact number validation preserves source precision and refuses ambiguous counts, exponent notation and negative quantities', () => {
@@ -140,7 +140,7 @@ test('tax and adjustment links are bound to stable row IDs and the correct goods
 
 test('goods identity is preserved across reorder and orphaned entries can be explicitly removed', () => {
   const draft=save(undefined,action('1.83',{kind:'quantity',amount:'2',unitCode:'MANUAL-UNIT'}));
-  assert.deepEqual(getDeclarationIssues(draft,{...context,goods:[context.goods[1],context.goods[0]]}),[]);
+  assert.deepEqual(getDeclarationIssues(draft,{...context,goods:[context.goods[1],context.goods[0]]}).filter(issue => !issue.id.endsWith(':required')),[]);
   const orphanContext={...context,goods:[context.goods[1]]};
   assert.equal(getDeclarationCoverage(draft,orphanContext).orphaned,1);
   assert.ok(getDeclarationIssues(draft,orphanContext).some(issue=>issue.description.includes('không còn')));
@@ -148,7 +148,7 @@ test('goods identity is preserved across reorder and orphaned entries can be exp
   const remove={type:'remove_declaration_field' as const,caseId:context.caseId,fieldId:'1.83',goodsLineId:'goods-1',reason:'Source goods line intentionally removed.'};
   assert.ok(declarationRemoveActionSchema.safeParse(remove).success);
   const cleared=removeDeclarationField(draft,remove,orphanContext);
-  assert.deepEqual(getDeclarationIssues(cleared,orphanContext),[]);
+  assert.deepEqual(getDeclarationIssues(cleared,orphanContext).filter(issue => !issue.id.endsWith(':required')),[]);
   assert.equal(draft.fields.length,1);
   assert.throws(()=>removeDeclarationField(draft,{...remove,reason:' '},orphanContext),/reason/);
 });
@@ -171,7 +171,7 @@ test('applicable row references require an applicable populated target, while no
     const emptyTarget=save(undefined,{...parent,value:blank,review:false});
     assert.throws(()=>save(emptyTarget,dependent),/populated row/);
     const populated=save(undefined,parent);
-    assert.deepEqual(getDeclarationIssues(save(populated,dependent),context),[]);
+    assert.deepEqual(getDeclarationIssues(save(populated,dependent),context).filter(issue => !issue.id.endsWith(':required')),[]);
   }
 });
 

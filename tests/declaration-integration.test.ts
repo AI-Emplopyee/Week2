@@ -1,18 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  applyAction,
   createEmptyWorkspace,
   getIssues,
   getProposedFields,
   initializeDeclarationDrafts,
 } from "../lib/engine.ts";
+import { applyFixtureAction as applyAction } from './helpers/kimi-fixtures.ts';
 import { syntheticShipments } from "../lib/demo.ts";
 import { parseMutation } from "../lib/server-validation.ts";
 import { buildReportContent } from "../lib/report-content.ts";
 import { getDeclarationEntry } from "../lib/declaration.ts";
+import { DECLARATION_FIELDS } from '../lib/declaration-catalog.ts';
 import type { SaveDeclarationFieldAction } from "../lib/declaration-types.ts";
 import type { Action, Actor, WorkspaceState } from "../lib/types.ts";
+import { completeRequiredEcusFixture } from './ecus-fixtures.ts';
 
 const actor: Actor = {
   id: "declaration-reviewer",
@@ -58,9 +60,11 @@ function ready() {
     reviewedLineIds: state.cases[0].goods.map(line => line.id),
     reason: "Synthetic goods reviewed.",
   });
+  const netWeight = state.candidates.find(candidate => candidate.field === "netWeight")!;
+  state = act(state, { type: "review_field", caseId, field: "netWeight", value: netWeight.value, candidateId: netWeight.id, reason: "Synthetic reviewer explicitly checked the single medium-confidence reading." });
   // This legacy synthetic fixture omits a weight unit. A person supplies it;
   // the application must never infer kilograms from the field's UI label.
-  return act(
+  state = act(
     state,
     fieldAction(state, {
       fieldId: "1.28",
@@ -74,6 +78,7 @@ function ready() {
       reason: "Synthetic gross-weight unit confirmed.",
     }),
   );
+  return completeRequiredEcusFixture(state, caseId, actor);
 }
 function fieldAction(
   state: WorkspaceState,
@@ -139,8 +144,8 @@ test("legacy cases receive only empty editable drafts and old snapshots are neve
     getIssues(state, shipment.id).filter(
       (issue) => issue.kind === "declaration",
     ).length,
-    0,
-    "Unentered conditional fields do not become invented legal requirements.",
+    38,
+    "An empty legacy draft asks for the photographed required headers and each required goods cell.",
   );
 });
 
@@ -457,7 +462,7 @@ test("declaration report includes coverage, typed values, basis, source version 
     .filter((block) => block.kind === "text")
     .map((block) => block.value)
     .join("\n");
-  assert.equal(report.data.declarationCoverage.length, 96);
+  assert.equal(report.data.declarationCoverage.length, DECLARATION_FIELDS.length);
   for (const expected of [
     "SYNTHETIC-REFERENCE",
     "Synthetic commercial evidence checked.",
@@ -468,6 +473,9 @@ test("declaration report includes coverage, typed values, basis, source version 
     "Structural coverage:",
     "Codes: unverified",
     "1.96",
+    "ecus.goodsCode",
+    "Goods code",
+    "ecus.exciseTaxAmount",
   ])
     assert.ok(text.includes(expected), expected);
   assert.equal(JSON.stringify(state), before);

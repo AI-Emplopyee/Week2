@@ -1,8 +1,10 @@
 "use client";
 import { useLocale } from "@/lib/i18n";
 import { fieldLabel, translateIssue } from "@/lib/i18n-core";
+import { getEcusFormField } from "@/lib/ecus-form";
 import { getDeclarationField } from "@/lib/declaration-catalog";
 import { expandedReviewIssueId, reviewQuestion } from "@/lib/review-questions";
+import { automaticQuestionIssues } from "@/lib/shipment-correspondence";
 import { useState } from "react";
 import type {
   Action,
@@ -78,6 +80,14 @@ export function ShipmentIssues({
   const [previewId, setPreviewId] = useState("");
   const expandedId = expandedReviewIssueId(caseIssues, selectedIssue);
   const editable = current.status === "review";
+  const emailDraft = state.emailDrafts?.find(
+    (draft) => draft.caseId === current.id && draft.status === "draft",
+  );
+  const externalQuestionIds = new Set(
+    automaticQuestionIssues(state, current, caseIssues).map(
+      (issue) => issue.id,
+    ),
+  );
   return (
     <aside className="issues-panel">
       <div className="panel-heading">
@@ -88,20 +98,68 @@ export function ShipmentIssues({
         </h2>
       </div>
       <p className="issues-intro">
-        {t(
-          "Chỉ hỏi thông tin còn thiếu, chưa rõ hoặc mâu thuẫn sau khi đối chiếu cả lô chứng từ.",
-        )}
+        {locale === "vi"
+          ? "Thông tin có dẫn nguồn rõ ràng được tự điền. Các mục còn lại được đối chiếu tiếp; thông tin cần hỏi người gửi sẽ được gom vào một email nháp sau khi đọc đủ chứng từ."
+          : "Clear, supported information is autofilled. Remaining items are compared further; information needed from the sender is collected into one email draft after all documents are read."}
       </p>
+      {emailDraft && emailDraft.automation?.state !== "resolved" && (
+        <div className="questions-draft-ready">
+          <Mail size={16} />
+          <div>
+            <strong>
+              {locale === "vi"
+                ? emailDraft.approval
+                  ? "Email nháp đã được duyệt"
+                  : "Email nháp đang chờ bạn duyệt"
+                : emailDraft.approval
+                  ? "Email draft approved"
+                  : "An email draft is waiting for your approval"}
+            </strong>
+            <p>
+              {hasPendingEmailDraft
+                ? locale === "vi"
+                  ? "Bạn có chỉnh sửa email chưa lưu."
+                  : "You have unsaved email edits."
+                : emailDraft.automation?.state === "waiting_for_sources"
+                  ? locale === "vi"
+                    ? "Đang chờ đọc đủ chứng từ để cập nhật câu hỏi."
+                    : "Waiting for the source reading to finish before updating the questions."
+                  : locale === "vi"
+                    ? `${emailDraft.issueIds.length} thông tin được gom trong bản nháp. Chưa gửi email.`
+                    : `${emailDraft.issueIds.length} information requests are collected in the draft. No email was sent.`}
+            </p>
+            <button className="text-button" onClick={onMessages}>
+              {locale === "vi" ? "Xem email nháp" : "Review email draft"}
+              <ArrowRight size={12} />
+            </button>
+          </div>
+        </div>
+      )}
       {caseIssues.map((issue) => {
         const question = reviewQuestion(state, issue);
         const catalogField = issue.field
           ? getDeclarationField(issue.field)
           : undefined;
-        const label = catalogField
-          ? locale === "vi"
-            ? catalogField.labelVi
-            : catalogField.labelEn
-          : fieldLabel(issue.field || "", locale);
+        const ecusField = issue.ecusFieldKey
+          ? getEcusFormField(issue.ecusFieldKey)
+          : undefined;
+        const baseLabel = ecusField
+          ? `${locale === "vi" ? ecusField.sectionVi : ecusField.sectionEn} · ${locale === "vi" ? ecusField.labelVi : ecusField.labelEn}`
+          : catalogField
+            ? locale === "vi"
+              ? catalogField.labelVi
+              : catalogField.labelEn
+            : fieldLabel(issue.field || "", locale);
+        const lineNumber = issue.goodsLineId
+          ? current.goods.findIndex((line) => line.id === issue.goodsLineId) + 1
+          : 0;
+        const label =
+          baseLabel +
+          (lineNumber
+            ? locale === "vi"
+              ? ` — dòng hàng ${lineNumber}`
+              : ` — goods row ${lineNumber}`
+            : "");
         const prompt =
           question.kind === "confirm"
             ? t("Vui lòng xác nhận {p0} là {p1}.", {
@@ -117,7 +175,7 @@ export function ShipmentIssues({
                 ? t("Chưa tìm thấy {p0} trong lô chứng từ. Vui lòng bổ sung.", {
                     p0: label,
                   })
-                : issue.title;
+                : translateIssue(issue, locale).title;
         const preview =
           question.candidates.find((candidate) => candidate.id === previewId) ||
           question.candidates[0];
@@ -167,7 +225,9 @@ export function ShipmentIssues({
               </span>
               <ChevronDown size={14} />
             </button>
-            {expandedId === issue.id && <p>{issue.description}</p>}
+            {expandedId === issue.id && (
+              <p>{translateIssue(issue, locale).description}</p>
+            )}
             {expandedId === issue.id && (
               <div className="issue-detail">
                 <div className="question-decision">
@@ -194,14 +254,22 @@ export function ShipmentIssues({
                       <button
                         className="button secondary small"
                         disabled={busy || !editable}
-                        onClick={() => void acceptCandidate(current, candidate)}
+                        onClick={() =>
+                          issue.ecusFieldKey
+                            ? onDeclaration(issue)
+                            : void acceptCandidate(current, candidate)
+                        }
                       >
                         <Check size={13} />
-                        {t(
-                          candidate.lineId
-                            ? "Đối chiếu bảng hàng hóa"
-                            : "Xác nhận giá trị",
-                        )}
+                        {issue.ecusFieldKey
+                          ? locale === "vi"
+                            ? "Mở ô cần bổ sung"
+                            : "Open field"
+                          : t(
+                              candidate.lineId
+                                ? "Đối chiếu bảng hàng hóa"
+                                : "Xác nhận giá trị",
+                            )}
                       </button>
                     </div>
                   ))}
@@ -228,34 +296,16 @@ export function ShipmentIssues({
                       {t("Chưa có chứng từ nguồn cho thông tin này.")}
                     </p>
                   )}
-                  <button
-                    className="button secondary small question-ask"
-                    disabled={busy || !editable || hasPendingEmailDraft}
-                    onClick={() =>
-                      void mutation(
-                        {
-                          type: "draft_questions",
-                          caseId: current.id,
-                          issueIds: [issue.id],
-                          locale,
-                        },
-                        t("Đã lưu câu hỏi vào email nháp. Chưa gửi email."),
-                      ).then((saved) => {
-                        if (saved) onMessages();
-                      })
-                    }
-                  >
-                    <Mail size={13} />
-                    {t("Hỏi người gửi")}
-                  </button>
-                  {hasPendingEmailDraft && (
-                    <p className="issue-guidance">
-                      {t(
-                        "Lưu nội dung email đang chỉnh sửa trước khi thêm câu hỏi.",
-                      )}{" "}
-                      <button className="text-button" onClick={onMessages}>
-                        {t("Mở email nháp")}
-                      </button>
+                  {externalQuestionIds.has(issue.id) && (
+                    <p className="issue-guidance question-email-state">
+                      <Mail size={12} />
+                      {emailDraft?.issueIds.includes(issue.id)
+                        ? locale === "vi"
+                          ? "Thông tin này đã có trong email nháp chờ duyệt."
+                          : "This request is already included in the email draft awaiting review."
+                        : locale === "vi"
+                          ? "Thông tin này sẽ được đưa vào email nháp tự động nếu vẫn chưa rõ sau khi đọc đủ chứng từ."
+                          : "This will be included in the automatic email draft if it remains unresolved after all sources are read."}
                     </p>
                   )}
                   {issue.documentIds.length > 0 &&
@@ -367,8 +417,20 @@ export function ShipmentIssues({
                     <blockquote>{preview.originalText}</blockquote>
                     {preview.visualEvidence ? (
                       <>
-                        <VisionEvidenceImage documentId={source.id} page={preview.page} evidence={preview.visualEvidence} />
-                        <a className="evidence-link" href={`/api/documents/${source.id}#page=${preview.page}`} target="_blank" rel="noreferrer">{t("Chứng từ nguồn")}<ArrowUpRight size={12} /></a>
+                        <VisionEvidenceImage
+                          documentId={source.id}
+                          page={preview.page}
+                          evidence={preview.visualEvidence}
+                        />
+                        <a
+                          className="evidence-link"
+                          href={`/api/documents/${source.id}#page=${preview.page}`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {t("Chứng từ nguồn")}
+                          <ArrowUpRight size={12} />
+                        </a>
                       </>
                     ) : source.blobKey && source.mime === "application/pdf" ? (
                       <iframe

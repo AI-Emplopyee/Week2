@@ -1,4 +1,5 @@
 import { VNACCS_FIELDS } from './vnaccs.ts';
+import { ECUS_ADDITIONAL_CATALOG } from './ecus-form.ts';
 import type { DeclarationCatalogField, DeclarationComponent, DeclarationInput, DeclarationValue } from './declaration-types.ts';
 
 const component = (key: string, labelVi: string, labelEn: string, input: DeclarationInput = 'text', sourceCell = 'Chỉ tiêu / Indicator'): DeclarationComponent => ({ key, labelVi, labelEn, input, sourceCell });
@@ -71,5 +72,5 @@ export const DECLARATION_CATALOG: readonly DeclarationCatalogField[] = VNACCS_FI
     sourceRefs: [field.provenance.baseline, ...field.provenance.amendments].map(source => ({ sourceId: source.sourceId, section: source.section, pages: source.pages ?? [], effectiveFrom: source.effectiveFrom })),
   };
 });
-export const DECLARATION_FIELDS = DECLARATION_CATALOG;
-export function getDeclarationField(id: string): DeclarationCatalogField | undefined { return DECLARATION_CATALOG.find(field => field.id === id); }
+export const DECLARATION_FIELDS: readonly DeclarationCatalogField[] = [...DECLARATION_CATALOG, ...ECUS_ADDITIONAL_CATALOG];
+export function getDeclarationField(id: string): DeclarationCatalogField | undefined { return DECLARATION_FIELDS.find(field => field.id === id); }

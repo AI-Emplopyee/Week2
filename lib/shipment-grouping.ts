@@ -7,7 +7,6 @@ type Profile = {
   caseIds: string[];
   facts: Map<string, Set<string>>;
   strong: Map<string, Set<string>>;
-  containerSeals: Set<string>;
   synthetic: boolean;
 };
 export type ShipmentGroup = {
@@ -58,7 +57,6 @@ function profile(document: ShipmentDocument, candidates: Candidate[]): Profile {
     caseIds: document.caseId ? [document.caseId] : [],
     facts: new Map(),
     strong: new Map(),
-    containerSeals: new Set(),
     synthetic: document.synthetic,
   };
   for (const candidate of candidates.filter(
@@ -79,44 +77,7 @@ function profile(document: ShipmentDocument, candidates: Candidate[]): Profile {
       if (candidate.confidence !== "low") add(result.strong, field, key);
     }
   }
-  // Container lists are sets. A packing page may describe one member of a 14-container shipment.
-  // Read only explicit tokens/labels. Never treat instructions embedded in source text as commands.
-  for (const page of document.extractionPipeline === "kimi" ? [] : document.pages) {
-    const trustworthy =
-      page.textSource !== "manual" &&
-      !(page.textSource === "ocr" && (page.ocrConfidence ?? 0) < 0.8);
-    const lines = page.text.toUpperCase().split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      const containers = lines[i].match(/\b[A-Z]{4}\d{7}\b/g) ?? [];
-      for (const container of containers) {
-        add(result.facts, "container", container);
-        if (trustworthy) add(result.strong, "container", container);
-      }
-      const labelledSeal =
-        /\bSEAL(?:\s*(?:NO\.?|NUMBER))?\s*[:#/-]?\s*([A-Z0-9-]{5,25})\b/.exec(
-          lines[i],
-        );
-      if (labelledSeal && !/^NUMBER$|^CONTAINER$/.test(labelledSeal[1])) {
-        add(result.facts, "seal", labelledSeal[1]);
-        if (trustworthy) add(result.strong, "seal", labelledSeal[1]);
-      }
-      // The common container / seal row has an explicit container followed by a seal token.
-      const adjacent =
-        /\b([A-Z]{4}\d{7})\s*[/|,\t ]+\s*([A-Z]{2,8}\d{4,15})\b/.exec(lines[i]);
-      if (adjacent && !/^[A-Z]{4}\d{7}$/.test(adjacent[2]) && trustworthy)
-        result.containerSeals.add(`${adjacent[1]}:${adjacent[2]}`);
-      if (containers.length === 1 && labelledSeal && trustworthy)
-        result.containerSeals.add(`${containers[0]}:${labelledSeal[1]}`);
-      if (containers.length === 1 && !labelledSeal && trustworthy) {
-        const nextSeal =
-          /^\s*SEAL(?:\s*(?:NO\.?|NUMBER))?\s*[:#/-]?\s*([A-Z0-9-]{5,25})\b/.exec(
-            lines[i + 1] ?? "",
-          );
-        if (nextSeal)
-          result.containerSeals.add(`${containers[0]}:${nextSeal[1]}`);
-      }
-    }
-  }
+  // Group only typed source candidates; raw document text is never an extraction fallback.
   return result;
 }
 function combined(profiles: Profile[]): Profile {
@@ -125,7 +86,6 @@ function combined(profiles: Profile[]): Profile {
     caseIds: [],
     facts: new Map(),
     strong: new Map(),
-    containerSeals: new Set(),
     synthetic: profiles[0].synthetic,
   };
   for (const p of profiles) {
@@ -135,7 +95,6 @@ function combined(profiles: Profile[]): Profile {
       for (const value of values) add(merged.facts, field, value);
     for (const [field, values] of p.strong)
       for (const value of values) add(merged.strong, field, value);
-    for (const pair of p.containerSeals) merged.containerSeals.add(pair);
   }
   merged.documentIds.sort();
   merged.caseIds = [...new Set(merged.caseIds)].sort();
@@ -162,12 +121,11 @@ function match(a: Profile, b: Profile): Match | undefined {
     disjoint(set(a, field), set(b, field)),
   );
   const container = strongMatch(a, b, "container");
-  const pairedSeal = overlap(a.containerSeals, b.containerSeals);
   const seal = strongMatch(a, b, "seal");
   if (
     !partyConflict &&
     !disjoint(set(a, "invoiceNumber"), set(b, "invoiceNumber")) &&
-    (pairedSeal || (container && seal && parties > 0))
+    container && seal && parties > 0
   )
     return {
       rank: 90,

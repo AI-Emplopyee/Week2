@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  applyAction,
   createEmptyWorkspace,
   getIssues,
   getProposedFields,
 } from "../lib/engine.ts";
-import { classifyDocument, extractDocument } from "../lib/extraction.ts";
+import { applyFixtureAction as applyAction } from './helpers/kimi-fixtures.ts';
+import { classifyDocument, extractDocument } from "./helpers/legacy-extraction.ts";
 import { groupShipmentDocuments } from "../lib/shipment-grouping.ts";
 import type {
   Actor,
@@ -73,7 +73,7 @@ function packet() {
     ),
     upload(
       "detail",
-      `PACKING LIST\n${parties}\nContainer: TEST1234567\nSeal No: SEAL123456`,
+      `PACKING LIST\nInvoice Number: TEST-INV-101\n${parties}\nContainer: TEST1234567\nSeal No: SEAL123456`,
     ),
   ];
 }
@@ -97,6 +97,12 @@ function grouped(files: UploadedDocument[]) {
 function activeCount(state: ReturnType<typeof createEmptyWorkspace>) {
   return state.cases.filter((c) => !c.mergedInto).length;
 }
+
+test("grouping never extracts container or seal matches from unprocessed document text", () => {
+  const source = "BILL OF LADING\nContainer: TEST1234567\nSeal No: SEAL123456";
+  const documents = [doc(upload("first-unread", source)), doc(upload("second-unread", source))];
+  assert.equal(groupShipmentDocuments(documents, [], []).length, 2);
+});
 
 test("all six documents form one evidence-linked shipment in every attachment order", () => {
   for (const files of permutations(packet())) {
@@ -512,7 +518,7 @@ test("completeness questions wait for confirmed grouping, then expose truly abse
   assert.equal(
     getIssues(state).some(
       (issue) =>
-        issue.kind === "missing" || issue.id.endsWith(":goods-missing"),
+        issue.id.endsWith(":required") || issue.id.endsWith(":goods-missing"),
     ),
     false,
   );
@@ -525,7 +531,7 @@ test("completeness questions wait for confirmed grouping, then expose truly abse
     },
     actor,
   );
-  assert.ok(getIssues(state).some((issue) => issue.kind === "missing"));
+  assert.ok(getIssues(state).some((issue) => issue.ecusFieldKey === 'invoiceTotal' && issue.id.endsWith(':required')));
   assert.ok(
     getIssues(state).some((issue) => issue.id.endsWith(":goods-missing")),
   );
@@ -634,7 +640,7 @@ test("new import attachments stay separate from export cases and AI refresh cann
 
   state = applyAction(state, {
     type: 'add_ai_candidates', caseId: exportId, documentId: 'house', documentVersion: 1,
-    model: 'synthetic-model', pages: [1],
+    model: 'synthetic-model', pages: [1], pageReadings: [{ page: 1, documentType: 'bill_of_lading', readability: 'clear' }],
     proposals: [{ field: 'houseBillOfLading', value: 'TEST-HBL-101', quote: 'HBL Number: TEST-HBL-101', page: 1, confidence: 'medium' }],
   }, actor);
   assert.equal(activeCount(state), 2);

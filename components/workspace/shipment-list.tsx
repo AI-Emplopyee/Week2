@@ -11,6 +11,7 @@ import {
   ChevronDown,
   ChevronRight,
   FileText,
+  Mail,
   Plus,
   Search,
   ShieldCheck,
@@ -46,7 +47,8 @@ export function ShipmentList({
   onUpload,
   onDemo,
 }: Props) {
-  const { t, date } = useLocale();
+  const { t, date, locale } = useLocale();
+  const say = (vi: string, en: string) => (locale === "vi" ? vi : en);
   const sampleCases = state.cases.filter(
     (c) => !c.mergedInto && c.sourceCollection,
   );
@@ -56,11 +58,15 @@ export function ShipmentList({
   const archivedCases = state.cases.filter(
     (c) => !c.mergedInto && !c.sourceCollection && c.status === "completed",
   );
-  const issueCases = liveCases.filter((c) =>
-    c.caseType !== "reference" && unresolved.some((issue) => issue.caseId === c.id),
+  const issueCases = liveCases.filter(
+    (c) =>
+      c.caseType !== "reference" &&
+      unresolved.some((issue) => issue.caseId === c.id),
   );
   const readyCases = liveCases.filter(
-    (c) => c.caseType === "import" && !unresolved.some((issue) => issue.caseId === c.id),
+    (c) =>
+      c.caseType === "import" &&
+      !unresolved.some((issue) => issue.caseId === c.id),
   );
   const rows = (
     filter === "samples"
@@ -70,8 +76,12 @@ export function ShipmentList({
         : liveCases
   ).filter(
     (c) =>
-      (filter !== "issues" || c.caseType !== "reference" && unresolved.some((i) => i.caseId === c.id)) &&
-      (filter !== "ready" || c.caseType === "import" && !unresolved.some((i) => i.caseId === c.id)) &&
+      (filter !== "issues" ||
+        (c.caseType !== "reference" &&
+          unresolved.some((i) => i.caseId === c.id))) &&
+      (filter !== "ready" ||
+        (c.caseType === "import" &&
+          !unresolved.some((i) => i.caseId === c.id))) &&
       (!query ||
         [
           c.reference,
@@ -306,11 +316,76 @@ export function ShipmentList({
                   const issues = unresolved.filter((i) => i.caseId === c.id);
                   const docs = activeDocs(state, c.id);
                   const scope = caseScopeMessage(c.caseType);
-                  const sourceStatuses = docs.filter(document => !document.referenceOnly).map(document => document.extractionStatus);
-                  const extractionLabel = sourceStatuses.includes("unsupported") ? "Có tệp cần đổi định dạng"
-                    : sourceStatuses.includes("failed") ? "Có tệp không mở được"
-                      : sourceStatuses.includes("pending_ai") ? "Đang chờ Kimi đọc chứng từ"
-                        : sourceStatuses.includes("needs_transcription") ? "Có trang chưa đọc rõ"
+                  const sourceDocuments = docs.filter(
+                    (document) => !document.referenceOnly,
+                  );
+                  const sourceStatuses = sourceDocuments.map(
+                    (document) => document.extractionStatus,
+                  );
+                  const unreadDocuments = sourceDocuments.filter(
+                    (document) =>
+                      !["unsupported", "failed"].includes(
+                        document.extractionStatus,
+                      ) &&
+                      (document.extractionPipeline !== "kimi" ||
+                        document.extractionStatus === "pending_ai" ||
+                        document.pages.some((page) => !page.aiReadability)),
+                  );
+                  const draft =
+                    c.status === "review"
+                      ? state.emailDrafts?.find(
+                          (item) =>
+                            item.caseId === c.id &&
+                            item.status === "draft" &&
+                            item.automation &&
+                            item.automation.state !== "resolved",
+                        )
+                      : undefined;
+                  const sourceAction =
+                    c.status !== "review"
+                      ? undefined
+                      : sourceStatuses.includes("unsupported")
+                        ? "Có tệp cần đổi định dạng"
+                        : sourceStatuses.includes("failed")
+                          ? "Có tệp không mở được"
+                          : unreadDocuments.length
+                            ? "Đang chờ Kimi đọc chứng từ"
+                            : sourceStatuses.includes("needs_transcription")
+                              ? "Có trang chưa đọc rõ"
+                              : undefined;
+                  const coveredIssues = new Set(draft?.issueIds ?? []);
+                  const primarySourceDocuments = sourceDocuments.filter(
+                    (document) =>
+                      sourceStatuses.includes("unsupported")
+                        ? document.extractionStatus === "unsupported"
+                        : sourceStatuses.includes("failed")
+                          ? document.extractionStatus === "failed"
+                          : unreadDocuments.length
+                            ? unreadDocuments.includes(document)
+                            : document.extractionStatus ===
+                              "needs_transcription",
+                  );
+                  const otherIssues = issues.filter(
+                    (issue) =>
+                      !coveredIssues.has(issue.id) &&
+                      !(
+                        sourceAction &&
+                        issue.kind === "document" &&
+                        primarySourceDocuments.some(
+                          (document) =>
+                            issue.id === `${c.id}:document-${document.id}` ||
+                            issue.id === `${c.id}:kimi-original-${document.id}`,
+                        )
+                      ),
+                  );
+                  const extractionLabel = sourceStatuses.includes("unsupported")
+                    ? "Có tệp cần đổi định dạng"
+                    : sourceStatuses.includes("failed")
+                      ? "Có tệp không mở được"
+                      : sourceStatuses.includes("pending_ai")
+                        ? "Đang chờ Kimi đọc chứng từ"
+                        : sourceStatuses.includes("needs_transcription")
+                          ? "Có trang chưa đọc rõ"
                           : "Có nguồn đối chiếu";
                   return (
                     <tr key={c.id} onClick={() => openCase(c.id)}>
@@ -319,7 +394,11 @@ export function ShipmentList({
                           <span
                             className={`shipment-icon ${c.caseType === "import" && !issues.length ? "ready" : ""}`}
                           >
-                            {c.caseType === "reference" ? <FileText size={19} /> : <Ship size={19} />}
+                            {c.caseType === "reference" ? (
+                              <FileText size={19} />
+                            ) : (
+                              <Ship size={19} />
+                            )}
                           </span>
                           <div>
                             <button
@@ -331,7 +410,8 @@ export function ShipmentList({
                             <span className="case-reference">
                               {c.reference} <span>·</span>{" "}
                               {c.caseType === "import"
-                                ? proposed(state, c, "importer") || t("Chưa xác định bên nhập khẩu")
+                                ? proposed(state, c, "importer") ||
+                                  t("Chưa xác định bên nhập khẩu")
                                 : t(CASE_TYPE_LABELS[c.caseType])}
                             </span>
                             {c.sourceCollection && (
@@ -350,11 +430,12 @@ export function ShipmentList({
                                   {t("Dữ liệu giả lập")}
                                 </span>
                               )}
-                              {!c.groupingConfirmed && c.caseType !== "reference" && (
-                                <span className="grouping-tag">
-                                  {t("Chưa xác nhận phân nhóm")}
-                                </span>
-                              )}
+                              {!c.groupingConfirmed &&
+                                c.caseType !== "reference" && (
+                                  <span className="grouping-tag">
+                                    {t("Chưa xác nhận phân nhóm")}
+                                  </span>
+                                )}
                             </div>
                           </div>
                         </div>
@@ -373,16 +454,113 @@ export function ShipmentList({
                         </small>
                       </td>
                       <td>
-                        <Badge tone={scope ? (c.caseType === "unknown" || c.caseType === "unsupported" ? "amber" : "neutral") : c.status === "review" ? "blue" : "green"}>
+                        <Badge
+                          tone={
+                            scope
+                              ? c.caseType === "unknown" ||
+                                c.caseType === "unsupported"
+                                ? "amber"
+                                : "neutral"
+                              : c.status === "review"
+                                ? "blue"
+                                : "green"
+                          }
+                        >
                           <span className="badge-dot" />
-                          {t(c.caseType === "reference" ? "Chỉ tham khảo" : scope ? CASE_TYPE_LABELS[c.caseType] : STATUS[c.status])}
+                          {t(
+                            c.caseType === "reference"
+                              ? "Chỉ tham khảo"
+                              : scope
+                                ? CASE_TYPE_LABELS[c.caseType]
+                                : STATUS[c.status],
+                          )}
                         </Badge>
                       </td>
                       <td>
                         {scope ? (
-                          <span className="table-subtext" title={t(scope.description)}>
-                            {t(c.caseType === "reference" ? "Chỉ tham khảo" : scope.title)}
+                          <span
+                            className="table-subtext"
+                            title={t(scope.description)}
+                          >
+                            {t(
+                              c.caseType === "reference"
+                                ? "Chỉ tham khảo"
+                                : scope.title,
+                            )}
                           </span>
+                        ) : sourceAction ? (
+                          <div className="queue-next-action">
+                            <span className="issue-table-count">
+                              <Sparkles size={14} />
+                              {t(sourceAction)}
+                            </span>
+                            {draft && (
+                              <small className="table-subtext">
+                                {say(
+                                  "Email sẽ cập nhật sau khi đọc nguồn",
+                                  "Email draft updates after source reading",
+                                )}
+                              </small>
+                            )}
+                            {otherIssues.length > 0 && (
+                              <small className="table-subtext">
+                                {say(
+                                  `${otherIssues.length} mục cần kiểm tra thêm`,
+                                  `${otherIssues.length} other checks remain`,
+                                )}
+                              </small>
+                            )}
+                          </div>
+                        ) : draft?.automation ? (
+                          <div className="queue-next-action">
+                            <span
+                              className={
+                                draft.approval
+                                  ? "ready-label"
+                                  : "issue-table-count"
+                              }
+                            >
+                              <Mail size={14} />
+                              {draft.automation.state === "waiting_for_sources"
+                                ? say(
+                                    "Hoàn tất kiểm tra nguồn",
+                                    "Complete source review",
+                                  )
+                                : draft.automation.state === "needs_review"
+                                  ? say(
+                                      "Rà soát email đã cập nhật",
+                                      "Review updated email draft",
+                                    )
+                                  : draft.approval
+                                    ? say(
+                                        "Email đã duyệt · chưa gửi",
+                                        "Email approved · not sent",
+                                      )
+                                    : say(
+                                        "Email nháp đang chờ duyệt",
+                                        "Email draft awaiting approval",
+                                      )}
+                            </span>
+                            <small className="table-subtext">
+                              {draft.automation.state === "waiting_for_sources"
+                                ? say(
+                                    "Email sẽ cập nhật sau khi rà soát",
+                                    "Email draft updates after review",
+                                  )
+                                : say(
+                                    `${draft.automation.questionCount} thông tin cần hỏi trong một email`,
+                                    `${draft.automation.questionCount} questions in one email`,
+                                  )}
+                            </small>
+                            {otherIssues.length > 0 && (
+                              <small className="table-subtext">
+                                {say(
+                                  `${otherIssues.length} mục cần kiểm tra thêm`,
+                                  `${otherIssues.length} other checks remain`,
+                                )}
+                              </small>
+                            )}
+                          </div>
                         ) : issues.length ? (
                           <span className="issue-table-count">
                             <AlertCircle size={14} />

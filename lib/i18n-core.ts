@@ -1,3 +1,4 @@
+import { getEcusFormField } from './ecus-form.ts';
 import type { AuditEntry, DocumentType, Issue } from './types.ts';
 
 export type Locale = 'vi' | 'en';
@@ -5,7 +6,10 @@ export type TranslationParams = Record<string, unknown>;
 
 /** Presentation text only. Source evidence and reviewer-authored values never pass through this dictionary. */
 export const EN_TRANSLATIONS: Readonly<Record<string, string>> = {
+  "Cần Kimi đọc bản gốc": "Original awaiting Kimi reading",
+  "Dữ liệu cũ chưa được Kimi đọc. Ứng dụng sẽ đọc lại bản gốc khi Kimi được cấu hình; chưa yêu cầu bổ sung thông tin từ nội dung chưa đọc.": "Kimi has not read this historical source. The app will read the original when Kimi is configured, before requesting missing information.",
   "Kimi chưa đọc rõ chứng từ": "Kimi could not read the document clearly",
+  "Kimi chưa đọc rõ tất cả các trang. Thử đọc lại hoặc cung cấp bản rõ hơn.": "Kimi could not clearly read every page. Retry the source or supply a clearer copy.",
   "Có tệp cần đổi định dạng": "Some files need a supported format",
   "Có tệp không mở được": "Some original files could not be opened",
   "Có trang chưa đọc rõ": "Some pages remain unclear",
@@ -191,6 +195,7 @@ export const EN_TRANSLATIONS: Readonly<Record<string, string>> = {
   "Cần rà soát quyết định khác nhau khi ghép": "Conflicting decisions need review after merging",
   "Cần rà soát giá trị khai báo khác nhau khi ghép": "Conflicting declaration values need review after merging",
   "Đã điền bản nháp từ bộ chứng từ": "Draft synchronized from shipment documents",
+  "Đã tự động cập nhật lựa chọn nguồn cũ": "Obsolete source selection updated automatically",
   "Đã tạo câu hỏi trong email nháp": "Questions added to email draft",
   "Đã cập nhật email nháp": "Email draft updated",
   "Lưu nội dung email đang chỉnh sửa trước khi thêm câu hỏi.": "Save your email draft edits before adding another question.",
@@ -330,8 +335,6 @@ export const EN_TRANSLATIONS: Readonly<Record<string, string>> = {
   "Ghi lý do trước khi lưu hoặc xác nhận chỉ tiêu.": "Enter a reason before saving or reviewing this field.",
   "Đã lưu và rà soát chỉ tiêu. Quy tắc hải quan vẫn chưa xác minh.": "Field saved and reviewed internally. Customs rules remain unverified.",
   "Đã lưu bản nháp chỉ tiêu. Chưa đánh dấu đã rà soát.": "Field draft saved. It has not been marked reviewed.",
-  "BẢN KHAI ĐANG SOẠN": "WORKING DECLARATION",
-  "Soạn thông tin khai báo": "Prepare declaration",
   "Điền theo nhóm thông tin, đối chiếu chứng từ và xác nhận từng quyết định.": "Work through the information groups, compare documents and confirm each decision.",
   "Chưa xác minh quy định / mã": "Rules / codes unverified",
   "mục đã rà soát nội bộ": "entries reviewed internally",
@@ -399,6 +402,7 @@ export const EN_TRANSLATIONS: Readonly<Record<string, string>> = {
   "Số kiện phải là số nguyên rõ ràng, không có dấu phân nhóm.": "Package count must be an unambiguous integer without grouping separators.",
   "Ngày phiếu đóng gói cần làm rõ": "Clarify the packing list date",
   "{p0}: số lượng × đơn giá = {p1}, thành tiền = {p2}. So sánh chính xác, chưa áp dụng làm tròn. Giải thích chênh lệch, phí hoặc chiết khấu.": "{p0}: quantity × unit price = {p1}, line amount = {p2}. Exact comparison without rounding. Explain any difference, charges or discounts.",
+  "{p0}: số lượng × đơn giá = {p1}, thành tiền = {p2}. Chênh lệch vượt ±1 theo mục 1.86 của hướng dẫn được cung cấp.": "{p0}: quantity × unit price = {p1}, line amount = {p2}. The difference exceeds ±1 under section 1.86 of the supplied guide.",
   "Tổng thành tiền {p0}; trị giá hóa đơn {p1}. So sánh chính xác, chưa áp dụng làm tròn. Giải thích chênh lệch, phí hoặc chiết khấu.": "Line amounts total {p0}; invoice value {p1}. Exact comparison without rounding. Explain any difference, charges or discounts.",
   "Tổng quan": "Overview",
   "Hồ sơ lô hàng": "Shipment cases",
@@ -1441,6 +1445,18 @@ const DOC_VI: Readonly<Record<DocumentType, string>> = { invoice: 'Hóa đơn', 
 export function documentTypeLabel(type: DocumentType, locale: Locale): string { return translate(locale, DOC_VI[type] || type); }
 export function translateIssue(issue: Issue, locale: Locale): Issue {
   if (locale === 'vi') return issue;
+  const ecusField = issue.ecusFieldKey ? getEcusFormField(issue.ecusFieldKey) : undefined;
+  if (ecusField && (issue.id.endsWith(':required') || issue.id.includes(':ecus-evidence:'))) {
+    const rowNumber = /dòng hàng (\d+)/.exec(issue.title)?.[1];
+    const label = `${ecusField.sectionEn} · ${ecusField.labelEn}${rowNumber ? ` — goods row ${rowNumber}` : ''}`;
+    if (issue.id.endsWith(':required')) return { ...issue, title: `Please provide ${label}`, description: `Required information is missing: ${label}. Complete it in the ECUS IDA form.` };
+    const description = issue.id.endsWith(':conflict')
+      ? `The sources give different values for ${label}. Compare the evidence and enter the correct value in the form.`
+      : issue.id.endsWith(':invalid')
+        ? `${label} was supplied, but its format or supporting evidence is unclear. Confirm the value without guessing.`
+        : `${label} could not be read clearly or remains uncertain. Check the source and confirm it in the form.`;
+    return { ...issue, title: `Please clarify ${label}`, description };
+  }
   let title = translateSystemText(issue.title, locale);
   if (issue.field) {
     const label = fieldLabel(issue.field, locale).toLocaleLowerCase('en');
@@ -1461,6 +1477,7 @@ const AUDIT_VI: Readonly<Record<string, string>> = {
   "merged_review_conflict": "Cần rà soát quyết định khác nhau khi ghép",
   "merged_declaration_conflict": "Cần rà soát giá trị khai báo khác nhau khi ghép",
   "shipment_declaration_synchronized": "Đã điền bản nháp từ bộ chứng từ",
+  "source_selection_superseded": "Đã tự động cập nhật lựa chọn nguồn cũ",
   "email_questions_drafted": "Đã tạo câu hỏi trong email nháp",
   "email_draft_updated": "Đã cập nhật email nháp",
   declaration_field_saved: 'Đã lưu chỉ tiêu khai báo', declaration_field_reviewed: 'Đã rà soát chỉ tiêu khai báo', declaration_field_removed: 'Đã xóa chỉ tiêu khai báo',

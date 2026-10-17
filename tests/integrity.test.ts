@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { addDecimal, compareDecimal, formatDecimal, isIsoDate, multiplyDecimal, parseExactDecimal } from '../lib/integrity.ts';
-import { applyAction, createEmptyWorkspace, getIssues } from '../lib/engine.ts';
+import { createEmptyWorkspace, getIssues } from '../lib/engine.ts';
+import { applyFixtureAction as applyAction } from './helpers/kimi-fixtures.ts';
 import { syntheticShipments } from '../lib/demo.ts';
 import type { Actor } from '../lib/types.ts';
 
@@ -36,13 +37,16 @@ test('malformed nonempty unit price and packing-list dates cannot bypass review 
   assert.equal(state.cases[0].goods[0].unitPrice, '1e3');
   assert.equal(state.cases[0].fields.packingListDate.value, '2026-02-30');
 });
-test('pilot reconciliation flags exact small differences and supports a reviewer explanation', () => {
+test('guide tolerance accepts a small rounding difference but larger discrepancies require an explanation', () => {
   let state = applyAction(createEmptyWorkspace('exact-workspace'), { type: 'intake', documents: syntheticShipments()[1].documents }, actor);
   const id = state.cases[0].id; const goods = structuredClone(state.cases[0].goods);
   goods[0] = { ...goods[0], quantity: '3', unitPrice: '0.333', amount: '1' };
   state = applyAction(state, { type: 'review_goods', caseId: id, goods, reason: 'Synthetic rounding example.' }, actor);
+  assert.ok(!getIssues(state, id).some(item => item.id.includes('goods-math-')));
+  goods[0].amount = '2';
+  state = applyAction(state, { type: 'review_goods', caseId: id, goods, reason: 'Synthetic difference of 1.001, beyond the supplied guide tolerance.' }, actor);
   const issue = getIssues(state, id).find(item => item.id.includes('goods-math-'))!;
   assert.ok(issue); assert.match(issue.description, /0\.999/);
-  state = applyAction(state, { type: 'resolve_issue', caseId: id, issueId: issue.id, reason: 'Source invoice rounds this synthetic line to whole currency units; preserved explicit amount.' }, actor);
+  state = applyAction(state, { type: 'resolve_issue', caseId: id, issueId: issue.id, reason: 'Synthetic invoice has an explicit additional line charge; preserved its amount.' }, actor);
   assert.equal(getIssues(state, id).find(item => item.id === issue.id)?.resolved, true);
 });

@@ -1,12 +1,14 @@
 import { z } from 'zod';
+import { SHIPMENT_TEXT_LIMITS } from './source-text-limits.ts';
 import { DECLARATION_CATALOG, getDeclarationField } from './declaration-catalog.ts';
 import { VNACCS_FIELDS } from './vnaccs.ts';
+import { ECUS_FORM_FIELDS, getEcusRequiredIssues } from './ecus-form.ts';
 import { compareDecimal, isIsoDate, parseExactDecimal } from './integrity.ts';
 import type { Issue } from './types.ts';
 import type { DeclarationContext, DeclarationCoverage, DeclarationDraft, DeclarationFieldEntry, DeclarationFinding, DeclarationProvenance, DeclarationSaveContext, DeclarationValue, RemoveDeclarationFieldAction, SaveDeclarationFieldAction } from './declaration-types.ts';
 
 // Bounds protect the pilot workspace, not legal field lengths or allowed-value tables.
-export const DECLARATION_LIMITS = { maxRows: 100, maxEntries: 5000, maxComponentLength: 1000, maxTextLength: 12000, maxProvenance: 20 } as const;
+export const DECLARATION_LIMITS = { maxRows: 100, maxEntries: 5000, maxComponentLength: SHIPMENT_TEXT_LIMITS.maxComponentLength, maxTextLength: 12000, maxProvenance: 20 } as const;
 const atom = z.string().max(DECLARATION_LIMITS.maxComponentLength);
 const id = z.string().min(1).max(160).regex(/^[a-zA-Z0-9_:.\-]+$/);
 const goodsId = z.string().min(1).max(300).regex(/^[a-zA-Z0-9_:.\-]+$/);
@@ -46,14 +48,15 @@ export const declarationValueSchema = z.discriminatedUnion('kind', [
 const visualEvidenceSchema = z.object({ candidateId: id, imageSha256: z.string().regex(/^[a-f0-9]{64}$/), bounds: z.tuple([z.number().finite().min(0).max(1), z.number().finite().min(0).max(1), z.number().finite().positive().max(1), z.number().finite().positive().max(1)]).refine(([x, y, width, height]) => x + width <= 1.000001 && y + height <= 1.000001), textAgreement: z.boolean() }).strict();
 export const declarationProvenanceSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('manual'), note: z.string().min(1).max(4000) }).strict(),
-  z.object({ kind: z.literal('document'), documentId: id, documentVersion: z.number().int().positive(), page: z.number().int().positive(), quote: z.string().min(1).max(1600), visualEvidence: visualEvidenceSchema.optional() }).strict(),
+  z.object({ kind: z.literal('document'), documentId: id, documentVersion: z.number().int().positive(), page: z.number().int().positive(), quote: z.string().min(1).max(SHIPMENT_TEXT_LIMITS.maxQuoteLength), candidateId: id.optional(), confidenceScore: z.number().finite().min(0).max(100).optional(), visualEvidence: visualEvidenceSchema.optional() }).strict(),
 ]);
+const declarationFieldIdSchema = z.string().max(160).refine(fieldId => !!getDeclarationField(fieldId), 'Unknown declaration indicator.');
 export const declarationActionSchema = z.object({
-  type: z.literal('save_declaration_field'), caseId: id, fieldId: z.string().regex(/^1\.(?:[1-9]|[1-8]\d|9[0-6])$/), goodsLineId: goodsId.optional(),
+  type: z.literal('save_declaration_field'), caseId: id, fieldId: declarationFieldIdSchema, goodsLineId: goodsId.optional(),
   applicability: z.enum(['unresolved', 'applicable', 'not_applicable']), basis: z.string().max(4000), value: declarationValueSchema,
   provenance: z.array(declarationProvenanceSchema).max(DECLARATION_LIMITS.maxProvenance), reason: z.string().min(1).max(4000), review: z.boolean(),
 }).strict();
-export const declarationRemoveActionSchema = z.object({ type: z.literal('remove_declaration_field'), caseId: id, fieldId: z.string().regex(/^1\.(?:[1-9]|[1-8]\d|9[0-6])$/), goodsLineId: goodsId.optional(), reason: z.string().min(1).max(4000) }).strict();
+export const declarationRemoveActionSchema = z.object({ type: z.literal('remove_declaration_field'), caseId: id, fieldId: declarationFieldIdSchema, goodsLineId: goodsId.optional(), reason: z.string().min(1).max(4000) }).strict();
 
 export function declarationEntryKey(fieldId: string, goodsLineId?: string): string { return JSON.stringify([fieldId, goodsLineId ?? null]); }
 export function getDeclarationEntry(draft: DeclarationDraft | undefined, fieldId: string, goodsLineId?: string): DeclarationFieldEntry | undefined { return draft?.fields.find(entry => declarationEntryKey(entry.fieldId, entry.goodsLineId) === declarationEntryKey(fieldId, goodsLineId)); }
@@ -89,6 +92,15 @@ export function isDeclarationSourceCurrent(source: DeclarationProvenance, contex
   const document = context.documents.find(doc => doc.id === source.documentId && doc.caseId === context.caseId && doc.active && doc.version === source.documentVersion);
   const page = document?.pages.find(page => page.page === source.page);
   if (!page || !source.quote.trim()) return false;
+  if (source.confidenceScore !== undefined && (!Number.isFinite(source.confidenceScore) || source.confidenceScore < 0 || source.confidenceScore > 100)) return false;
+  if (source.candidateId !== undefined || source.confidenceScore !== undefined) {
+    const candidateId = source.candidateId ?? source.visualEvidence?.candidateId;
+    if (!candidateId || (source.visualEvidence && candidateId !== source.visualEvidence.candidateId)) return false;
+    const candidate = context.candidates?.find(item => item.id === candidateId && item.caseId === context.caseId && item.documentId === source.documentId && item.documentVersion === source.documentVersion && item.page === source.page);
+    // A reread may change only the estimate. That does not revoke the same
+    // literal source or invalidate a human decision; scores are informational.
+    if (!candidate?.method.startsWith('kimi:') || !candidate.originalText.includes(source.quote)) return false;
+  }
   if (!source.visualEvidence) return page.text.includes(source.quote);
   const evidence = source.visualEvidence;
   if (!visualEvidenceSchema.safeParse(evidence).success) return false;
@@ -139,7 +151,7 @@ export function validateDeclarationEntry(entry: DeclarationFieldEntry, context: 
     }
     if ('arrivalDate' in record && 'departureDate' in record && isIsoDate(record.arrivalDate) && isIsoDate(record.departureDate) && record.arrivalDate > record.departureDate) add('date_order',prefix,'Ngày rời điểm trung chuyển trước ngày đến.','Transit departure date precedes arrival date.');
     // Pairing describes the entered measurement, not a claim that any given indicator is mandatory.
-    if (['invoice','charge','money','unit_price','specific_tax','adjustments'].includes(field.kind) && !!record.currencyCode !== !!record.amount) add('money_pair',prefix,'Khi nhập số tiền hoặc đồng tiền, cần cả hai để xác định trị số tiền tệ.','When entering an amount or its currency, provide both to identify the monetary value.');
+    if (['invoice','charge','money','unit_price','specific_tax','adjustments'].includes(field.kind) && !['1.86','1.87'].includes(field.id) && !!record.currencyCode !== !!record.amount) add('money_pair',prefix,'Khi nhập số tiền hoặc đồng tiền, cần cả hai để xác định trị số tiền tệ.','When entering an amount or its currency, provide both to identify the monetary value.');
     if (field.kind === 'quantity' && !!record.amount !== !!record.unitCode) add('quantity_pair',prefix,'Khi nhập số lượng hoặc đơn vị, cần cả hai để xác định đại lượng.','When entering quantity or unit, provide both to identify the measurement.');
     if (field.kind === 'tax_relief_rows' && record.reliefCode && !record.taxRowId) add('reference',prefix,'Mã miễn/giảm cần liên kết tới dòng sắc thuế đã nhập.','Link the relief code to its captured tax-category row.');
     if (field.kind === 'tax_amount_rows' && record.amount && !record.taxRowId) add('reference',prefix,'Số tiền giảm cần liên kết tới dòng sắc thuế đã nhập.','Link the reduction amount to its captured tax-category row.');
@@ -165,6 +177,13 @@ export function saveDeclarationField(draft: DeclarationDraft | undefined, reques
   if (field.scope === 'item' ? !action.goodsLineId || !context.goods.some(line => line.id === action.goodsLineId) : action.goodsLineId !== undefined) throw new Error('Declaration field scope or goods-line identity is invalid.');
   if ('rows' in action.value && new Set(action.value.rows.map(row => row.id)).size !== action.value.rows.length) throw new Error('Repeating-row IDs must be unique.');
   const next = migrateDeclarationDraft(draft);
+  for (const source of action.provenance) {
+    if (source.kind !== 'document' || source.confidenceScore === undefined) continue;
+    const candidateId = source.candidateId ?? source.visualEvidence?.candidateId;
+    const candidate = context.candidates?.find(item => item.id === candidateId && item.caseId === context.caseId && item.documentId === source.documentId && item.documentVersion === source.documentVersion && item.page === source.page);
+    const previouslyRecorded = next.fields.some(saved => saved.provenance.some(proof => JSON.stringify(proof) === JSON.stringify(source)));
+    if (!previouslyRecorded && candidate?.confidenceScore !== source.confidenceScore) throw new Error('A model confidence score must match its saved source candidate.');
+  }
   const entry: DeclarationFieldEntry = { fieldId: action.fieldId, ...(action.goodsLineId !== undefined ? { goodsLineId: action.goodsLineId } : {}), applicability: action.applicability, basis: action.basis, value: structuredClone(action.value), provenance: structuredClone(action.provenance), reason: action.reason, review: action.review ? { actorId: context.actor.id, actorName: context.actor.name, at: context.at, reason: action.reason } : null, stale: false, updatedBy: context.actor.id, updatedAt: context.at, codeVerification: 'unverified' };
   const invalidEvidence = provenanceProblems(entry, context);
   if (invalidEvidence.length) throw new Error(invalidEvidence[0].messageEn);
@@ -187,9 +206,8 @@ export function removeDeclarationField(draft: DeclarationDraft | undefined, requ
 }
 function fingerprint(value: unknown): string { const text = JSON.stringify(value); let hash = 2166136261; for (let i=0;i<text.length;i++) { hash ^= text.charCodeAt(i); hash = Math.imul(hash,16777619); } return (hash >>> 0).toString(16); }
 export function getDeclarationIssues(draft: DeclarationDraft | undefined, context: DeclarationContext): Issue[] {
-  if (!draft) return [];
-  const issues: Issue[] = [];
-  for (const entry of draft.fields) {
+  const issues: Issue[] = getEcusRequiredIssues(draft, context);
+  for (const entry of draft?.fields ?? []) {
     const findings = validateDeclarationEntry(entry, context, draft);
     if (entry.stale) findings.push({ code:'stale',path:'review',messageVi:'Nguồn hoặc dữ liệu liên quan đã thay đổi; cần rà soát lại quyết định.',messageEn:'Evidence or related data changed; review this decision again.' });
     // Source-backed drafts are reviewed together by the explicit shipment approval
@@ -198,7 +216,8 @@ export function getDeclarationIssues(draft: DeclarationDraft | undefined, contex
     else if (!entry.review && entry.generatedBy !== 'shipment_extraction') findings.push({ code:'review',path:'review',messageVi:'Giá trị cấu trúc chưa được người phụ trách rà soát.',messageEn:'The structured entry has not been reviewed.' });
     for (const finding of findings) {
       const key = declarationEntryKey(entry.fieldId,entry.goodsLineId);
-      issues.push({ id:`${context.caseId}:declaration:${key}:${finding.code}:${finding.path}`,caseId:context.caseId,kind:'declaration',severity:'error',title:`Rà soát chỉ tiêu ${entry.fieldId}`,description:finding.messageVi,field:entry.fieldId,candidateIds:[],documentIds:entry.provenance.flatMap(source=>source.kind==='document'?[source.documentId]:[]),resolved:false,fingerprint:fingerprint({entry,finding}) });
+      const formField = ECUS_FORM_FIELDS.find(field => field.fieldId === entry.fieldId && (finding.path === `value.${field.component}` || finding.path.endsWith(`.${field.component}`))) ?? ECUS_FORM_FIELDS.find(field => field.fieldId === entry.fieldId);
+      issues.push({ id:`${context.caseId}:declaration:${key}:${finding.code}:${finding.path}`,caseId:context.caseId,kind:'declaration',severity:'error',title:`Rà soát chỉ tiêu ${entry.fieldId}`,description:finding.messageVi,field:entry.fieldId,...(formField ? {ecusFieldKey:formField.key} : {}),...(entry.goodsLineId ? {goodsLineId:entry.goodsLineId} : {}),candidateIds:[],documentIds:entry.provenance.flatMap(source=>source.kind==='document'?[source.documentId]:[]),resolved:false,fingerprint:fingerprint({entry,finding}) });
     }
   }
   return issues;
