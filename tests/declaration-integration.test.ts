@@ -102,6 +102,28 @@ function fieldAction(
     ...overrides,
   };
 }
+
+test('an unresolved optional component alone blocks approval and ECUS handoff despite valid sibling cells', () => {
+  const clean = ready();
+  const caseId = clean.cases[0].id;
+  assert.equal(getIssues(clean, caseId).filter(issue => !issue.resolved).length, 0);
+  const withProblem = (state: WorkspaceState) => {
+    const next = structuredClone(state);
+    const address = getDeclarationEntry(next.cases[0].declarationDraft, '1.22')!;
+    assert.ok(address.value.kind === 'address');
+    address.value.city = '';
+    address.componentIssues = [{ component: 'city', reason: 'conflict' }];
+    address.stale = false;
+    return next;
+  };
+  const pending = withProblem(clean);
+  const blockers = getIssues(pending, caseId).filter(issue => !issue.resolved);
+  assert.equal(blockers.length, 1, 'this test is blocked by the optional component, not unrelated required fields');
+  assert.ok(blockers[0].id.includes(':source_conflict:value.city'));
+  assert.throws(() => act(pending, { type: 'approve', caseId }), /chưa thể/);
+  const approved = act(clean, { type: 'approve', caseId });
+  assert.throws(() => act(withProblem(approved), { type: 'handoff', caseId, simulateFailure: false }), /Còn vấn đề/);
+});
 function savedField(
   state: WorkspaceState,
   fieldId = "1.40",

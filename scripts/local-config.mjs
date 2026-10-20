@@ -43,7 +43,7 @@ export function prepareLocalFiles(root = process.cwd(), providerEnvironment = {}
   }
   const config = {
     name: 'aicd-local', main: resolve(root, 'build/worker.ts'), compatibility_date: '2026-05-15', compatibility_flags: ['nodejs_compat'],
-    vars: { AICD_AUTH_MODE: 'local' }, secrets: { required: Object.keys(secrets) },
+    vars: { AICD_AUTH_MODE: 'local', AICD_BACKGROUND_PROCESSING: providerEnvironment.AICD_BACKGROUND_PROCESSING === '0' ? '0' : '1' }, secrets: { required: Object.keys(secrets) },
     d1_databases: [{ binding: 'DB', database_name: 'aicd-local-db', database_id: LOCAL_DATABASE_ID, migrations_dir: resolve(root, 'drizzle') }],
     r2_buckets: [{ binding: 'BUCKET', bucket_name: 'aicd-local-documents' }],
   };

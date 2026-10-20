@@ -7,13 +7,14 @@ import {
   Bell,
   ChevronRight,
   FolderOpen,
+  FlaskConical,
   HardDrive,
   Settings2,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { initials } from "./shared";
 
-export type WorkspaceView = "shipments" | "settings";
+export type WorkspaceView = "shipments" | "settings" | "samples";
 
 type Props = {
   view: WorkspaceView;
@@ -73,6 +74,7 @@ export function WorkspaceShell({
               <span className="nav-count">{shipmentCount}</span>
             )}
           </button>
+          {localMode && <button className={`nav-item ${view === "samples" ? "active" : ""}`} aria-current={view === "samples" ? "page" : undefined} aria-label={locale==='en'?'Sample tests':'Kiểm thử mẫu'} title={locale==='en'?'Sample tests':'Kiểm thử mẫu'} onClick={()=>onNavigate('samples')}><FlaskConical size={18}/><span>{locale==='en'?'Sample tests':'Kiểm thử mẫu'}</span></button>}
           <button
             className={`nav-item ${view === "settings" ? "active" : ""}`}
             aria-label={t("Cài đặt")}
@@ -107,7 +109,7 @@ export function WorkspaceShell({
       <div className="workspace-main">
         <header className="topbar">
           <div className="breadcrumbs">
-            {t(view === "settings" ? "Cài đặt" : "Lô hàng")}
+            {view==='samples' ? (locale==='en'?'Sample tests':'Kiểm thử mẫu') : t(view === "settings" ? "Cài đặt" : "Lô hàng")}
             {shipmentReference && (
               <>
                 <ChevronRight size={14} />

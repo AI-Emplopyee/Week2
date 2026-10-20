@@ -70,6 +70,7 @@ import { ShipmentReport } from "@/components/workspace/shipment-report";
 import { SourceFields } from "@/components/workspace/source-fields";
 import { SourceGoods } from "@/components/workspace/source-goods";
 import { WorkspaceSettings } from "@/components/workspace/workspace-settings";
+import { SampleReview } from "@/components/workspace/sample-review";
 import {
   WorkspaceShell,
   type WorkspaceView,
@@ -117,6 +118,7 @@ function Workspace() {
   } = useWorkspaceSession();
   const pendingFieldSaves = useRef(new Map<string, string>());
   const [view, setView] = useState<WorkspaceView>("shipments");
+  useEffect(()=>{if(localMode && new URLSearchParams(window.location.search).get('view')==='samples') setView('samples');},[localMode]);
   const [shipmentQuery, setShipmentQuery] = useState("");
   const [shipmentFilter, setShipmentFilter] = useState("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -140,7 +142,6 @@ function Workspace() {
   >();
   const [docId, setDocId] = useState("");
   const [page, setPage] = useState(1);
-  const [sourceMode, setSourceMode] = useState("text");
   const [selectedDocs, setSelectedDocs] = useState<string[]>([]);
   const [selectedIssue, setSelectedIssue] = useState("");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -270,7 +271,7 @@ function Workspace() {
         const status = await statusResponse.json() as ClientAiStatus & { error?: string };
         if (!statusResponse.ok) throw new Error(status.error || t("Không thể kiểm tra kết nối Kimi."));
         if (status.configured && status.visionSupported === false) throw new Error(t("Quản trị viên cần chọn mô hình Kimi hỗ trợ đọc ảnh."));
-        if (status.configured) {
+        if (status.configured && !status.backgroundProcessing) {
           setExtractionCancelable(true);
           let workspace = body;
           const queue: { documentId: string; batches: number[][] }[] = [];
@@ -308,7 +309,7 @@ function Workspace() {
           }
           currentFile = "";
           if (skipped.length) setError(`${t("Một số chứng từ cần kiểm tra trước khi đọc bằng AI. Bản gốc vẫn được lưu.")} ${skipped.join(" · ")}`);
-        } else {
+        } else if (!status.configured) {
           setError(t("Chứng từ đã được lưu và đang chờ Kimi. Quản trị viên cần cấu hình Kimi trên máy chủ để trích xuất dữ liệu."));
         }
       }
@@ -339,6 +340,9 @@ function Workspace() {
   };
   const navigate = (next: WorkspaceView) => {
     setView(next);
+    const url=new URL(window.location.href);
+    if(next==='samples') url.searchParams.set('view','samples'); else url.searchParams.delete('view');
+    window.history.replaceState(null,'',url);
     setSelectedId(null);
     setModal(null);
     setSecondary(null);
@@ -365,7 +369,6 @@ function Workspace() {
   const evidence = (candidate: Candidate) => {
     setDocId(candidate.documentId);
     setPage(candidate.page);
-    setSourceMode(candidate.visualEvidence ? "original" : "text");
   };
   const saveField = async (c: ShipmentCase, field: string) => {
     const key = `${c.id}:${field}`;
@@ -545,6 +548,22 @@ function Workspace() {
     window.addEventListener("beforeunload", warnBeforeLeave);
     return () => window.removeEventListener("beforeunload", warnBeforeLeave);
   }, [hasAnyPendingDrafts, busy]);
+  // Background writes install only when no local edit is pending, and only if the
+  // exact state seen at request start is still current when the response arrives.
+  useEffect(() => {
+    if (!localMode || busy || hasAnyPendingDrafts || conflictRef.current) return;
+    const controller = new AbortController();
+    const timer = window.setInterval(() => {
+      const initial = stateRef.current;
+      if (!initial) return;
+      void fetchWithSession('/api/workspace', { signal: controller.signal, headers: { 'If-None-Match': `"${initial.state.id}:${initial.state.revision}"` } }).then(async response => {
+        if (!response.ok) return;
+        const body = await response.json() as WorkspaceResponse;
+        if (!controller.signal.aborted && !conflictRef.current && stateRef.current === initial && body.state.revision > initial.state.revision) install(body);
+      }).catch(() => undefined);
+    }, 4000);
+    return () => { controller.abort(); window.clearInterval(timer); };
+  }, [localMode, busy, hasAnyPendingDrafts, conflictRef, install, stateRef]);
   const liveCases =
     state?.cases.filter((c) => !c.mergedInto && c.status !== "completed") || [];
   const automaticDraft = state?.emailDrafts?.find(draft => draft.caseId === current?.id && draft.automation && draft.automation.state !== 'resolved');
@@ -575,6 +594,7 @@ function Workspace() {
           setError(locale === 'vi' ? 'Bản gốc đang chờ Kimi. Cần cấu hình khóa Kimi trên máy chủ để ứng dụng tự đọc và điền biểu mẫu.' : 'Originals are waiting for Kimi. Configure the server Kimi key to read and fill the forms automatically.');
           return;
         }
+        if (status.backgroundProcessing) return;
         setExtractionCancelable(true);
         await runCaseKimi({ workspace: refreshed, caseId, status, signal: controller.signal,
           onWorkspace: response => { install(response); setError(""); },
@@ -599,11 +619,9 @@ function Workspace() {
         shipment={current}
         documentId={docId}
         page={page}
-        mode={sourceMode}
         selectedDocuments={selectedDocs}
         onDocumentChange={setDocId}
         onPageChange={setPage}
-        onModeChange={setSourceMode}
         onSelectionChange={setSelectedDocs}
         busy={busy || !!conflict}
         hasPendingDrafts={hasPendingDrafts}
@@ -651,7 +669,6 @@ function Workspace() {
         onDocument={(id, page) => {
           setDocId(id);
           setPage(page);
-          setSourceMode("original");
           if (tab === "declaration") setShipmentTab("documents");
         }}
         onDeclaration={(issue) => {
@@ -1282,6 +1299,8 @@ function Workspace() {
             </>
           )}
         </>
+      ) : view === "samples" && localMode ? (
+        <SampleReview />
       ) : view === "settings" ? (
         <WorkspaceSettings data={data!} busy={busy} mutation={mutation} />
       ) : (

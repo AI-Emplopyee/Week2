@@ -8,6 +8,7 @@ import type { SourcePage, ShipmentDocument, WorkspaceResponse } from './types.ts
 export const VISION_IMAGE_LIMITS = { maxDimension: 2600, maxBytes: 1.5 * 1024 * 1024 };
 export type ClientAiStatus = {
   configured: boolean;
+  backgroundProcessing?: boolean;
   visionSupported?: boolean;
   model: string | null;
   endpoint: string;

@@ -280,6 +280,8 @@ export const EN_TRANSLATIONS: Readonly<Record<string, string>> = {
   "Số tiền giảm cần liên kết tới dòng sắc thuế đã nhập.": "Link the reduction amount to its captured tax-category row.",
   "Thứ tự tờ khai không thể lớn hơn tổng số tờ khai đã nhập.": "Declaration sequence cannot exceed the captured total declaration count.",
   "Nguồn hoặc dữ liệu liên quan đã thay đổi; cần rà soát lại quyết định.": "Evidence or related data changed; review this decision again.",
+  "Nguồn của ô này chưa thống nhất; ô để trống và cần xác nhận trước khi phê duyệt.": "Sources disagree for this component; it remains empty and must be resolved before approval.",
+  "Giá trị hoặc bằng chứng của ô này chưa hợp lệ; ô để trống và cần xác nhận trước khi phê duyệt.": "This component has invalid or unsupported source data; it remains empty and must be resolved before approval.",
   "Giá trị cấu trúc chưa được người phụ trách rà soát.": "The structured entry has not been reviewed.",
   "Chỉ tiêu do hệ thống / công chức hải quan quản lý; AICD chỉ tham chiếu, không cho người khai ghi giá trị.": "Owned by the customs system or officers; AICD references this indicator without allowing declarant-entered values.",
   "Nguồn mô tả ba ô nhưng đều yêu cầu chưa nhập cho đến khi có hướng dẫn. Chưa xác minh hướng dẫn mới hoặc ý nghĩa từng ô; không tạo cấu trúc giả định.": "The source lists three cells but defers all entry pending guidance. New guidance and individual cell meanings are unverified; no structure is invented.",

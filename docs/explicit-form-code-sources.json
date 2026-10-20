@@ -1,0 +1,47 @@
+{
+  "verifiedOn": "2026-10-19",
+  "scope": "Exact representations for clearly evidenced form fields only; no inferred quantities, package classification, payment terms, taxes or human approval.",
+  "sources": [
+    {
+      "id": "vnaccs-ccs4eo-v1-p25",
+      "publisher": "Binh Phuoc customs government website",
+      "title": "CCS4EO_VNACCS_UM V1.0",
+      "url": "https://binhphuoc.gov.vn/vi/haiquan/hai-quan-viet-nam/chinh-thuc-trien-khai-phan-mem-khai-hai-quan-mien-phi-cho-doanh-nghiep-tu-00h-ngay-01-01-2022-1168.html?download=1&id=0",
+      "locator": "Printed page 25, Add goods form screenshot, quantity unit controls",
+      "excerpt": "PCE - PIECES; PCE - Cái/chiếc",
+      "supports": "PCE represents pieces in VNACCS quantity and invoice-price unit controls. PC, PCS, piece and pieces are explicit spelling variants. This is not a mapping from packages, sets or arbitrary units.",
+      "retrieval": "Public search index includes the manual's page-25 screenshot contents; direct PDF open failed. No local employee answers used."
+    },
+    {
+      "id": "unece-rec20-kilogram",
+      "publisher": "UNECE",
+      "title": "Recommendation 20, Codes for Units of Measure Used in International Trade",
+      "url": "https://service.unece.org/trade/uncefact/vocabulary/rec20/",
+      "secondaryPrimaryUrl": "https://unece.org/sites/default/files/datastore/fileadmin/DAM/trade/untdid/download/r1224a2.pdf",
+      "locator": "rec20:kilogram / rdf:value KGM; TRADE/WP.4/R.1224/Add.2 printed page 13, kilogram row",
+      "excerpt": "kilogram | kg | KGM",
+      "supports": "Explicit physical kilogram units map to KGM without numerical scaling. Package-unit KG is excluded because it can denote keg; KGS is excluded because the codebook uses it for kilogram per second."
+    },
+    {
+      "id": "vnaccs-circular-38-2015",
+      "publisher": "Vietnam Ministry of Finance, official Vietnam Trade Portal and Government Gazette",
+      "title": "Circular 38/2015/TT-BTC, Appendix II, import field 1.43",
+      "url": "https://www.vietnamtradeportal.gov.vn/kcfinder/upload/files/Phu%20luc%202%20-%20Chi%20tieu%20thong%20tin%20khai%20hai%20quan%20(thong%20tu%2038).pdf",
+      "effectiveDateSource": "https://congbao.chinhphu.vn/van-ban/thong-tu-so-38-2015-tt-btc-9949/5954.htm",
+      "issued": "2015-03-25",
+      "effectiveFrom": "2015-04-01",
+      "locator": "PDF page 13 (zero-based 12), printed page 233, section 1.43; export section 2.38 repeats the definition",
+      "excerpt": "“TTR”: Điện chuyển tiền (bao gồm cả “TT” và “TTr”)",
+      "supports": "Literal TT, TTr and telegraphic transfer correspond to TTR under this specific codebook, applicable from 1 April 2015, including 2016. No applicability claim for earlier 2015 or current rules after later amendments.",
+      "activation": "Helper requires explicit vnaccs-circular-38-2015 selection. Ordinary form assembly does not select a payment codebook automatically.",
+      "localGuideConflict": {
+        "path": "lib/vnaccs-guide-source.json",
+        "id": "user-vnaccs-guide-2026-10-15",
+        "sha256": "719c059d8ca382d3c24d7a254779897cd0d76b71b62ba360ef60e56f51f187ef",
+        "section": "1.43",
+        "description": "Supplied older guide describes TTR as reimbursement by telegraphic transfer and puts TT under KC. It is preserved unchanged; its difference from the official 2015 definition is explicit."
+      }
+    }
+  ],
+  "exclusions": ["packageUnit", "KGS", "PK", "SET", "AU", "mixed payment phrases", "due dates", "inferred payment methods", "automatic code verification", "manual value replacement"]
+}

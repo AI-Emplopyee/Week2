@@ -40,7 +40,7 @@ MOONSHOT_MODEL=kimi-k2.6
 ```
 
 3. Restart with `npm run local`. The server reads these values from the private local file. A configuration check confirms only that settings exist; it does not test your account's balance or model access.
-4. Keep the browser open while extracting documents. New uploads use the configured pipeline; existing documents can be processed through their extraction action. See [Kimi vision extraction](kimi-vision.md) for the stages, evidence checks and remaining limits.
+4. Keep the local server running while extracting documents. The automatic reader continues with the browser closed and processes two originals in parallel. New supported uploads and imported email attachments enter a durable queue; sample collections and reference-only files do not. Existing failed pages can be deliberately retried through their extraction action. See [Kimi vision extraction](kimi-vision.md) for the stages, evidence checks and remaining limits.
 
 Do not paste the API key into chat, browser fields or a public repository. No key is bundled. The endpoint is fixed to `https://api.moonshot.ai/v1`. The private file is ignored by Git, excluded from source ZIPs and restricted to the Mac file owner. Hosted login settings in the project's root `.env` and `.dev.vars` files remain ignored by `npm run local`.
 
@@ -71,3 +71,7 @@ Run the smoke commands only against a separately started disposable AICD workspa
 ## Hosting later
 
 The intended team product will use Google sign-in and access approved by the owner. Those flows are still to be implemented. The source preserves the existing Supabase password adapter and Cloudflare deployment path in [standalone setup](standalone-setup.md). Before team use, configure HTTPS, verified identities, secrets, backups and access policy; migrate data with explicit identity mapping. Local mode cannot be deployed as an authentication bypass. No cloud provisioning, publishing or domain purchase is part of this local update.
+
+## Pause background processing for inspection
+
+Use `AICD_BACKGROUND_PROCESSING=0 npm run local` to run the local workspace without automatic document extraction or intake email matching. This leaves the saved provider key intact. Explicit manual AI actions still require deliberate use. Restart normally to resume pending queued pages. Successful pages, failures, rate-limit pauses and page timings are stored in the local SQLite database; failures wait for manual retry. No live Gmail synchronization or outgoing mail is performed.

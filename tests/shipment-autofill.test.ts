@@ -14,6 +14,7 @@ import {
 import {
   buildShipmentFacts,
   getEcusEvidenceIssues,
+  isShipmentFactClear,
   normalizedShipmentValue,
   syncShipmentDeclaration,
 } from "../lib/shipment-autofill.ts";
@@ -210,7 +211,7 @@ test("shipment autofill combines commercial, packing and transport documents wit
   assert.deepEqual(entry(shipment, "1.83", goodsId).value, {
     kind: "quantity",
     amount: "2",
-    unitCode: "PCS",
+    unitCode: "PCE",
   });
   assert.deepEqual(entry(shipment, "1.85", goodsId).value, {
     kind: "decimal",
@@ -220,7 +221,7 @@ test("shipment autofill combines commercial, packing and transport documents wit
     kind: "unit_price",
     amount: "50.00",
     currencyCode: "USD",
-    unitCode: "PCS",
+    unitCode: "PCE",
   });
   for (const draft of shipment.declarationDraft!.fields) {
     assert.equal(draft.generatedBy, "shipment_extraction");
@@ -292,6 +293,94 @@ test("duplicate totals are compared exactly, never summed, and input order does 
   );
 });
 
+test('form unit codes preserve original evidence and do not invent a second quantity or payment method', () => {
+  assert.equal(normalizedShipmentValue('unit', 'PCS'), 'piece');
+  assert.equal(normalizedShipmentValue('unit', 'PCE'), 'piece');
+  assert.equal(normalizedShipmentValue('unit2', 'KGM'), 'kg');
+  assert.equal(normalizedShipmentValue('grossWeightUnit', 'KG'), 'kg');
+  const { state, shipment } = packet();
+  const original = structuredClone(state.candidates);
+  sync(state, shipment);
+  const goodsId = shipment.goods[0].id;
+  const quantity = entry(shipment, '1.83', goodsId);
+  assert.deepEqual(quantity.value, { kind: 'quantity', amount: '2', unitCode: 'PCE' });
+  assert.equal(entry(shipment, '1.28').value.kind === 'quantity' && (entry(shipment, '1.28').value as { unitCode: string }).unitCode, 'KGM');
+  assert.match(quantity.reason, /form-code:.*PCE/);
+  assert.ok(quantity.provenance.some(proof => proof.kind === 'document' && proof.quote.includes('PCS')));
+  assert.equal(quantity.codeVerification, 'unverified');
+  assert.equal(quantity.review, null);
+  assert.deepEqual(state.candidates, original);
+  assert.equal(getDeclarationEntry(shipment.declarationDraft, '1.84', goodsId), undefined);
+  assert.equal(getDeclarationEntry(shipment.declarationDraft, '1.43'), undefined);
+  const before = structuredClone(shipment.declarationDraft);
+  sync(state, shipment);
+  assert.deepEqual(shipment.declarationDraft, before);
+});
+
+test('ambiguous or conflicting source units remain unresolved and uncertain evidence is not promoted', () => {
+  const { state, shipment } = packet();
+  const unit = state.candidates.find(candidate => candidate.field === 'unit')!;
+  unit.confidence = 'low';
+  unit.readability = 'uncertain';
+  sync(state, shipment);
+  assert.equal((entry(shipment, '1.83', shipment.goods[0].id).value as { unitCode: string }).unitCode, 'PCS');
+  assert.equal(isShipmentFactClear(state, 'unit', [unit]), false);
+  assert.equal(entry(shipment, '1.83', shipment.goods[0].id).review, null);
+  unit.confidence = 'high';
+  unit.readability = 'clear';
+  state.documents[0].pages[0].text += '\nUnit: SET';
+  state.candidates.push({ ...unit, id: 'incompatible-unit', value: 'SET', originalText: 'Unit: SET' });
+  sync(state, shipment);
+  const quantity = entry(shipment, '1.83', shipment.goods[0].id);
+  assert.equal((quantity.value as { unitCode: string }).unitCode, '');
+  assert.ok(quantity.componentIssues?.some(issue => issue.component === 'unitCode' && issue.reason === 'conflict'));
+});
+
+test('existing human unit decisions survive representation-only refresh and real changes stay stale', () => {
+  const { state, shipment } = packet();
+  sync(state, shipment);
+  const goodsLineId = shipment.goods[0].id;
+  shipment.declarationDraft = saveDeclarationField(shipment.declarationDraft, {
+    type: 'save_declaration_field', caseId: shipment.id, fieldId: '1.83', goodsLineId,
+    applicability: 'applicable', basis: 'Confirmed literal source quantity and unit.',
+    value: { kind: 'quantity', amount: '2', unitCode: 'PCS' },
+    provenance: [{ kind: 'manual', note: 'Reviewer confirmed the invoice unit.' }], reason: 'Confirmed source unit.', review: true,
+  }, { caseId: shipment.id, documents: state.documents, goods: shipment.goods, actor, at });
+  entry(shipment, '1.83', goodsLineId).sourceFingerprint = 'prior representation fingerprint';
+  sync(state, shipment);
+  const saved = entry(shipment, '1.83', goodsLineId);
+  assert.equal((saved.value as { unitCode: string }).unitCode, 'PCS');
+  assert.equal(saved.stale, false);
+  assert.ok(saved.review);
+  const unit = state.candidates.find(candidate => candidate.field === 'unit')!;
+  unit.value = 'SET';
+  unit.originalText = 'Unit: SET';
+  state.documents[0].pages[0].text += '\nUnit: SET';
+  sync(state, shipment);
+  assert.equal(entry(shipment, '1.83', goodsLineId).stale, true);
+  assert.equal((entry(shipment, '1.83', goodsLineId).value as { unitCode: string }).unitCode, 'PCS');
+});
+
+test('ambiguous KGS is distinct from KGM in unconverted quantity facts and stays a conflict', () => {
+  for (const field of ['unit', 'unit2', 'grossWeightUnit']) {
+    assert.notEqual(normalizedShipmentValue(field, 'KGS'), normalizedShipmentValue(field, 'KGM'));
+    assert.notEqual(normalizedShipmentValue(field, 'KGS'), normalizedShipmentValue(field, 'KG'));
+    assert.equal(normalizedShipmentValue(field, 'KG'), normalizedShipmentValue(field, 'KGM'));
+  }
+  const { state, shipment } = packet();
+  const unit = state.candidates.find(candidate => candidate.field === 'unit')!;
+  unit.value = 'KGM';
+  unit.originalText = 'Unit: KGM';
+  state.documents[0].pages[0].text += '\nUnit: KGM\nUnit: KGS';
+  state.candidates.push({ ...unit, id: 'ambiguous-flow-unit', value: 'KGS', originalText: 'Unit: KGS' });
+  const original = structuredClone(state.candidates);
+  sync(state, shipment);
+  const quantity = entry(shipment, '1.83', shipment.goods[0].id);
+  assert.equal((quantity.value as { unitCode: string }).unitCode, '');
+  assert.ok(quantity.componentIssues?.some(issue => issue.component === 'unitCode' && issue.reason === 'conflict'));
+  assert.deepEqual(state.candidates, original);
+});
+
 test("conflicting components stay empty while uncontested parts of the same field still populate", () => {
   const { state, shipment } = packet();
   addSource(
@@ -309,7 +398,10 @@ test("conflicting components stay empty while uncontested parts of the same fiel
     currencyCode: "USD",
     amount: "",
   });
-  assert.equal(draft.stale, true);
+  assert.equal(draft.stale, false, 'current clear siblings are not obsolete source decisions');
+  assert.deepEqual(draft.componentIssues, [{ component: 'amount', reason: 'conflict' }]);
+  assert.ok(getDeclarationIssues(shipment.declarationDraft, { caseId: shipment.id, documents: state.documents, candidates: state.candidates, goods: shipment.goods })
+    .some(issue => issue.id.includes(':source_conflict:value.amount') && issue.severity === 'error' && !issue.resolved));
   assert.equal(
     buildShipmentFacts(state, shipment).invoiceTotal.status,
     "conflict",
@@ -320,6 +412,65 @@ test("conflicting components stay empty while uncontested parts of the same fiel
     ),
     ["100.00", "200.00"],
   );
+});
+
+test('malformed source components stay blank and blocking while clear siblings remain current', () => {
+  const { state, shipment } = packet();
+  const amount = state.candidates.find(candidate => candidate.field === 'invoiceTotal')!;
+  const document = state.documents.find(document => document.id === amount.documentId)!;
+  document.pages[0].text = document.pages[0].text.replace('Invoice Total: 100.00', 'Invoice Total: 1.2.3');
+  amount.value = '1.2.3'; amount.originalText = 'Invoice Total: 1.2.3'; amount.normalizations = [];
+  sync(state, shipment);
+  const partial = entry(shipment, '1.44');
+  assert.deepEqual(partial.value, { kind: 'invoice', priceCategoryCode: '', incotermCode: 'FOB', currencyCode: 'USD', amount: '' });
+  assert.equal(partial.stale, false);
+  assert.equal(partial.review, null);
+  assert.deepEqual(partial.componentIssues, [{ component: 'amount', reason: 'invalid' }]);
+  const context = { caseId: shipment.id, documents: state.documents, candidates: state.candidates, goods: shipment.goods };
+  assert.ok(validateDeclarationEntry(partial, context).some(issue => issue.code === 'source_invalid' && issue.path === 'value.amount'));
+  assert.ok(getIssues(state, shipment.id).some(issue => issue.id.includes(':source_invalid:value.amount') && !issue.resolved));
+  const before = JSON.stringify(shipment.declarationDraft);
+  sync(state, shipment);
+  assert.equal(JSON.stringify(shipment.declarationDraft), before, 'repeated projection is stable');
+  document.pages[0].text = document.pages[0].text.replace('Invoice Total: 1.2.3', 'Invoice Total: 100.00');
+  amount.value = '100.00'; amount.originalText = 'Invoice Total: 100.00';
+  sync(state, shipment);
+  const resolved = entry(shipment, '1.44');
+  assert.equal(resolved.value.kind === 'invoice' && resolved.value.amount, '100.00');
+  assert.equal(resolved.componentIssues, undefined);
+  assert.equal(resolved.review, null, 'new evidence never creates a human approval');
+  assert.equal(validateDeclarationEntry(resolved, context).some(issue => issue.code.startsWith('source_')), false);
+});
+
+test('resolving source conflict removes only component findings and never fabricates a review', () => {
+  const { state, shipment } = packet();
+  const conflicting = addSource(state, shipment, 'conflicting-invoice', 'COMMERCIAL INVOICE\nInvoice Total: 200.00\nCurrency: USD');
+  sync(state, shipment);
+  assert.deepEqual(entry(shipment, '1.44').componentIssues, [{ component: 'amount', reason: 'conflict' }]);
+  conflicting.active = false;
+  sync(state, shipment);
+  const resolved = entry(shipment, '1.44');
+  assert.equal(resolved.componentIssues, undefined);
+  assert.equal(resolved.stale, false);
+  assert.equal(resolved.review, null);
+  assert.equal(resolved.value.kind === 'invoice' && resolved.value.amount, '100.00');
+});
+
+test('conflicts in a repeating source row preserve other rows with an exact component issue', () => {
+  const { state, shipment } = fixture();
+  addSource(state, shipment, 'permits', 'permitNumber: PERMIT-ONE\npermitNumber2: PERMIT-TWO\npermitCategory2: SOURCE-CATEGORY', 'other');
+  addSource(state, shipment, 'permit-conflict', 'permitNumber2: OTHER-PERMIT', 'other');
+  sync(state, shipment);
+  const permits = entry(shipment, '1.38');
+  assert.equal(permits.stale, false);
+  assert.deepEqual(permits.componentIssues, [{ component: 'reference', rowIndex: 1, reason: 'conflict' }]);
+  assert.ok('rows' in permits.value);
+  assert.equal((permits.value.rows[0] as Record<string, string>).reference, 'PERMIT-ONE');
+  assert.equal((permits.value.rows[1] as Record<string, string>).reference, '');
+  assert.ok(validateDeclarationEntry(permits, { caseId: shipment.id, documents: state.documents, candidates: state.candidates, goods: shipment.goods })
+    .some(problem => problem.code === 'source_conflict' && problem.path === 'value.rows.1.reference'));
+  assert.equal(getDeclarationIssues(shipment.declarationDraft, { caseId: shipment.id, documents: state.documents, candidates: state.candidates, goods: shipment.goods })
+    .find(problem => problem.id.includes(':source_conflict:value.rows.1.reference'))?.ecusFieldKey, 'permitNumber2');
 });
 
 test("container subsets form one set of evidence rather than a false scalar disagreement", () => {
@@ -685,7 +836,8 @@ test("all ECUS goods inputs accept explicit source cells, including tax schedule
   assert.equal(shipment.goods.length, 1);
   sync(state, shipment);
   for (const field of fields) {
-    assert.equal(ecusFormValue(field, shipment.declarationDraft, shipment.goods[0].id), values[field.key].replace("%", ""), field.key);
+    const expected = field.key === 'unit' ? 'PCE' : field.key === 'unit2' ? 'KGM' : values[field.key].replace('%', '');
+    assert.equal(ecusFormValue(field, shipment.declarationDraft, shipment.goods[0].id), expected, field.key);
     const saved = entry(shipment, field.fieldId, shipment.goods[0].id);
     assert.equal(saved.codeVerification, "unverified");
     assert.equal(saved.review, null);

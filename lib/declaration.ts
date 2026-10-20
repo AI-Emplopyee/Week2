@@ -125,6 +125,12 @@ export function validateDeclarationEntry(entry: DeclarationFieldEntry, context: 
   if (field.scope !== 'item' && entry.goodsLineId !== undefined) add('scope','goodsLineId','Chỉ tiêu phần chung không được gắn ID dòng hàng.','A header indicator cannot be bound to a goods line.');
   const parsed = declarationValueSchema.safeParse(entry.value);
   if (!parsed.success || entry.value.kind !== field.kind) { add('shape','value','Cấu trúc dữ liệu không đúng chỉ tiêu.','The value shape does not match this indicator.'); return findings; }
+  for (const problem of entry.componentIssues ?? []) {
+    const path = problem.rowIndex === undefined ? `value.${problem.component}` : `value.rows.${problem.rowIndex}.${problem.component}`;
+    add(`source_${problem.reason}`, path,
+      problem.reason === 'conflict' ? 'Nguồn của ô này chưa thống nhất; ô để trống và cần xác nhận trước khi phê duyệt.' : 'Giá trị hoặc bằng chứng của ô này chưa hợp lệ; ô để trống và cần xác nhận trước khi phê duyệt.',
+      problem.reason === 'conflict' ? 'Sources disagree for this component; it remains empty and must be resolved before approval.' : 'This component has invalid or unsupported source data; it remains empty and must be resolved before approval.');
+  }
   if (entry.applicability === 'unresolved') add('applicability','applicability','Chưa xác nhận chỉ tiêu có áp dụng cho hồ sơ này.','Applicability has not been explicitly decided for this case.');
   if (entry.applicability !== 'unresolved' && !entry.basis.trim()) add('basis','basis','Cần ghi căn cứ cho quyết định áp dụng / không áp dụng.','Record the basis for applicable / not-applicable status.');
   // Not-applicable entries retain explicitly entered context; applicability/basis determines its use.
@@ -216,7 +222,9 @@ export function getDeclarationIssues(draft: DeclarationDraft | undefined, contex
     else if (!entry.review && entry.generatedBy !== 'shipment_extraction') findings.push({ code:'review',path:'review',messageVi:'Giá trị cấu trúc chưa được người phụ trách rà soát.',messageEn:'The structured entry has not been reviewed.' });
     for (const finding of findings) {
       const key = declarationEntryKey(entry.fieldId,entry.goodsLineId);
-      const formField = ECUS_FORM_FIELDS.find(field => field.fieldId === entry.fieldId && (finding.path === `value.${field.component}` || finding.path.endsWith(`.${field.component}`))) ?? ECUS_FORM_FIELDS.find(field => field.fieldId === entry.fieldId);
+      const formField = ECUS_FORM_FIELDS.find(field => field.fieldId === entry.fieldId && finding.path === (field.rowIndex === undefined ? `value.${field.component}` : `value.rows.${field.rowIndex}.${field.component}`))
+        ?? ECUS_FORM_FIELDS.find(field => field.fieldId === entry.fieldId && finding.path.endsWith(`.${field.component}`))
+        ?? ECUS_FORM_FIELDS.find(field => field.fieldId === entry.fieldId);
       issues.push({ id:`${context.caseId}:declaration:${key}:${finding.code}:${finding.path}`,caseId:context.caseId,kind:'declaration',severity:'error',title:`Rà soát chỉ tiêu ${entry.fieldId}`,description:finding.messageVi,field:entry.fieldId,...(formField ? {ecusFieldKey:formField.key} : {}),...(entry.goodsLineId ? {goodsLineId:entry.goodsLineId} : {}),candidateIds:[],documentIds:entry.provenance.flatMap(source=>source.kind==='document'?[source.documentId]:[]),resolved:false,fingerprint:fingerprint({entry,finding}) });
     }
   }

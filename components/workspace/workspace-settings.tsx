@@ -5,6 +5,8 @@ import type { Action, WorkspaceResponse } from "@/lib/types";
 import { ArrowUpRight, Mail } from "lucide-react";
 import { useState } from "react";
 import { Badge } from "./shared";
+import { KimiPrompts } from "./kimi-prompts";
+import { AiProcessingStatus } from "./ai-processing-status";
 
 type Props = {
   data: WorkspaceResponse;
@@ -29,6 +31,8 @@ export function WorkspaceSettings({ data, busy, mutation }: Props) {
         </div>
       </div>
       <div className="settings-grid">
+        <KimiPrompts />
+        <AiProcessingStatus documents={data.state.documents} />
         <section className="card settings-card">
           <div className="section-heading">
             <h2>

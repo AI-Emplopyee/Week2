@@ -1,8 +1,10 @@
 import { env } from 'cloudflare:workers';
 import { z } from 'zod';
 import { consumeRateLimit } from '@/lib/auth-persistence';
-import { EMAIL_SHIPMENT_AI_LIMITS, planEmailShipmentMatches } from '@/lib/email-shipment-ai';
+import { EMAIL_SHIPMENT_AI_LIMITS, emailMatchingInputFingerprint, planEmailShipmentMatches } from '@/lib/email-shipment-ai';
 import { isEmailMatchCurrent } from '@/lib/email-grouping';
+import { initializeDeclarationDrafts } from '@/lib/engine';
+import { readWorkspaceState } from '@/lib/server-persistence';
 import { KimiError, kimiStatus, KIMI_LIMITS } from '@/lib/kimi';
 import { ApiError, expectRevision, mutate, readJson, requireSameOrigin, workspace, type WorkspaceContext } from '@/lib/server';
 
@@ -17,8 +19,18 @@ export async function matchEmailsInContext(context: WorkspaceContext, requestedI
   if (!await consumeRateLimit(context.db, `kimi-extract:${context.state.id}`, KIMI_LIMITS.requestsPerMinute, 60)) throw new ApiError(429, 'The Kimi request limit was reached. Saved emails are safe; resume matching in one minute.');
   try {
     const selected = emailIds.slice(0, EMAIL_SHIPMENT_AI_LIMITS.maxEmails);
+    const fingerprint = await emailMatchingInputFingerprint(context.state, selected);
     const plan = await planEmailShipmentMatches(config, context.state, selected);
-    const saved = await mutate(context, context.state.revision, { type: 'apply_email_matches', emailIds: plan.emailIds, matches: plan.matches, model: plan.model, truncated: plan.truncated });
+    let saved;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const latest = await readWorkspaceState(context.db, context.state.id, context.actor.id);
+      if (!latest) throw new ApiError(403, 'Workspace membership is required.');
+      context.state = initializeDeclarationDrafts(latest);
+      if (await emailMatchingInputFingerprint(context.state, selected) !== fingerprint) throw new ApiError(409, 'Email or shipment evidence changed during matching. The outdated match was not saved.');
+      try { saved = await mutate(context, context.state.revision, { type: 'apply_email_matches', emailIds: plan.emailIds, matches: plan.matches, model: plan.model, truncated: plan.truncated }); break; }
+      catch (error) { if (!(error instanceof ApiError) || error.status !== 409 || attempt === 7) throw error; }
+    }
+    if (!saved) throw new ApiError(409, 'Email matches could not be saved while the workspace was changing.');
     return { ...saved, grouping: { processedIds: plan.emailIds, omittedEmailIds: [...plan.omittedEmailIds, ...emailIds.slice(selected.length)], truncated: plan.truncated, rejected: plan.rejected, matched: plan.matches.filter(match => match.decision === 'link').length, needsReview: plan.matches.filter(match => match.decision === 'review').length } };
   } catch (error) {
     if (error instanceof KimiError) throw new ApiError(error.status, error.message);

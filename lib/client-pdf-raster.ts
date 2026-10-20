@@ -4,9 +4,11 @@ import type { PdfRaster } from './pdf-raster.ts';
 type RasterReply = { id: number; pageCount?: number; raster?: PdfRaster; error?: string };
 type RasterRequest = { type: 'open'; bytes: ArrayBuffer; wasmUrl: string } | { type: 'render'; page: number };
 
-/** The self-hosted renderer returns pixels to Kimi, never extracted PDF text. */
-export async function openPdfRasterizer(bytes: ArrayBuffer, signal?: AbortSignal, dependencies: { worker?: () => Worker } = {}): Promise<{ pageCount: number; render: (page: number) => Promise<PdfRaster>; close: () => void }> {
+/** The self-hosted renderer returns pixels for preview or Kimi, never extracted PDF text. */
+export async function openPdfRasterizer(bytes: ArrayBuffer, signal?: AbortSignal, dependencies: { worker?: () => Worker; maxPages?: number } = {}): Promise<{ pageCount: number; render: (page: number) => Promise<PdfRaster>; close: () => void }> {
   throwIfAborted(signal);
+  const maxPages = dependencies.maxPages ?? 50;
+  if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 200) throw new Error('Invalid PDF page limit.');
   // The explicit Vite worker import also survives the RSC transform, which may
   // replace import.meta.url with a file: URL in otherwise shared client modules.
   const worker = dependencies.worker
@@ -51,7 +53,7 @@ export async function openPdfRasterizer(bytes: ArrayBuffer, signal?: AbortSignal
   }
   try {
     const reply = await request({ type: 'open', bytes, wasmUrl: new URL('/pdfium/pdfium.wasm', window.location.origin).href }, [bytes]);
-    if (!Number.isInteger(reply.pageCount) || reply.pageCount! < 1 || reply.pageCount! > 50) throw new Error('PDF documents are limited to 50 pages. Split this document before extraction.');
+    if (!Number.isInteger(reply.pageCount) || reply.pageCount! < 1 || reply.pageCount! > maxPages) throw new Error(`PDF documents are limited to ${maxPages} pages. Split this document before extraction.`);
     return {
       pageCount: reply.pageCount!,
       async render(page) {

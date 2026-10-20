@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { env } from 'cloudflare:workers';
 import { consumeRateLimit } from '@/lib/auth-persistence';
 import { ApiError, bucket, expectRevision, json, privateHeaders, readLimitedBytes, requireSameOrigin, workspace } from '@/lib/server';
 import { imageHashSchema, isVisualDocument, jpegDimensions, sha256Hex, VISION_LIMITS, visionBlobKey, visionReferenceSchema, type KimiPageImage } from '@/lib/vision';
@@ -6,7 +7,7 @@ import type { ShipmentDocument } from '@/lib/types';
 
 const id = z.string().min(1).max(160).regex(/^[a-zA-Z0-9_-]+$/);
 const uploadSchema = z.object({
-  revision: z.coerce.number().int().nonnegative(), caseId: id, documentId: id,
+  revision: z.coerce.number().int().nonnegative(), caseId: id, documentId: id, automatic: z.literal('true').optional(),
   documentVersion: z.coerce.number().int().positive(), sha256: imageHashSchema,
   page: z.coerce.number().int().min(1).max(200),
   width: z.coerce.number().int().positive().max(VISION_LIMITS.maxDimension),
@@ -25,8 +26,9 @@ export async function uploadVisionPage(request: Request): Promise<Response> {
   const { image, ...metadata } = Object.fromEntries(form);
   const input = uploadSchema.parse(metadata);
   expectRevision(context, input.revision);
-  const document = context.state.documents.find(doc => doc.id === input.documentId && doc.caseId === input.caseId && doc.active);
-  const shipment = context.state.cases.find(item => item.id === input.caseId && !item.mergedInto);
+  if (input.automatic && (env.AICD_AUTH_MODE !== 'local' || env.AICD_BACKGROUND_PROCESSING !== '1')) throw new ApiError(403, 'Automatic page preparation requires the active local reader.');
+  const document = context.state.documents.find(doc => doc.id === input.documentId && doc.active && (input.automatic || doc.caseId === input.caseId));
+  const shipment = context.state.cases.find(item => item.id === document?.caseId && !item.mergedInto);
   if (!document || !shipment) throw new ApiError(404, 'Active document not found.');
   if (shipment.status === 'completed' || document.referenceOnly || !isVisualDocument(document)) throw new ApiError(422, 'This document is not available for shipment vision extraction.');
   if (document.version !== input.documentVersion || document.sha256 !== input.sha256) throw new ApiError(409, 'The original document changed. Render its current version again.');

@@ -39,3 +39,20 @@ export const authRecoveryGrants = sqliteTable('auth_recovery_grants', {
   userId: text('user_id').notNull(),
   expiresAt: integer('expires_at').notNull(),
 }, table => [index('auth_recovery_grants_expiry').on(table.expiresAt)]);
+
+export const aiProcessingJobs = sqliteTable('ai_processing_jobs', {
+  workspaceId: text('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  documentId: text('document_id').notNull(),
+  documentVersion: integer('document_version').notNull(),
+  sha256: text('sha256').notNull(),
+  page: integer('page').notNull(),
+  state: text('state').notNull().default('queued'),
+  leaseToken: text('lease_token'),
+  leaseUntil: integer('lease_until').notNull().default(0),
+  availableAt: integer('available_at').notNull().default(0),
+  attempts: integer('attempts').notNull().default(0),
+  startedAt: integer('started_at'),
+  completedAt: integer('completed_at'),
+  elapsedMs: integer('elapsed_ms'),
+  error: text('error'),
+}, table => [primaryKey({ columns: [table.workspaceId, table.documentId, table.documentVersion, table.sha256, table.page] }), index('ai_processing_jobs_active').on(table.workspaceId, table.state, table.leaseUntil)]);

@@ -310,7 +310,7 @@ export function ShipmentIssues({
                   )}
                   {issue.documentIds.length > 0 &&
                     !issue.candidateIds.length &&
-                    issue.documentIds.map((id) => (
+                    [...new Set(issue.documentIds)].map((id) => (
                       <button
                         className="evidence-link"
                         key={id}
@@ -509,7 +509,7 @@ export function ShipmentIssues({
                 {entry.actor} · {date(entry.at)}
               </small>
               <p className="completed-question-reason">{entry.reason}</p>
-              {entry.issue.documentIds.map((id) => {
+              {[...new Set(entry.issue.documentIds)].map((id) => {
                 const document = state.documents.find((item) => item.id === id);
                 if (!document?.blobKey) return null;
                 return (

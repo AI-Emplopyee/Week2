@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { localPort } from './local-config.mjs';
 import { prepareLocalLaunch } from './local-instance.mjs';
+import { startLocalBackground } from './local-background.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 process.chdir(root);
@@ -21,6 +22,8 @@ const migration = spawnSync(process.execPath, [fileURLToPath(new URL('../node_mo
 if (migration.error) throw migration.error;
 if (migration.status !== 0) process.exit(migration.status ?? 1);
 console.log(`AICD local workspace: http://127.0.0.1:${port}\nData stays in .aicd-local/state. Stop with Ctrl+C. No account is required.`);
+const background = process.env.AICD_BACKGROUND_PROCESSING === '0' ? null : startLocalBackground(`http://127.0.0.1:${port}`);
+process.once('exit', () => background?.stop());
 // Import the dev CLI in this process so Ctrl+C reaches the actual server.
 Object.assign(process.env, childEnv);
 for (const key of Object.keys(process.env)) if (!(key in childEnv)) delete process.env[key];

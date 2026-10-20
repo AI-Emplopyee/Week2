@@ -25,7 +25,8 @@ test('explicit equivalent gross totals reconcile in kilograms without changing o
   assert.deepEqual(state.candidates, before);
   syncShipmentDeclaration(state, shipment, actor);
   const saved = getDeclarationEntry(shipment.declarationDraft, '1.28')!;
-  assert.deepEqual(saved.value, { kind: 'quantity', amount: '2000', unitCode: 'KG' }); assert.match(saved.basis, /weight-unit:/);
+  assert.deepEqual(saved.value, { kind: 'quantity', amount: '2000', unitCode: 'KGM' }); assert.match(saved.basis, /weight-unit:/);
+  assert.deepEqual(state.candidates, before);
   assert.ok(saved.provenance.some(proof => proof.kind === 'document' && proof.quote.includes('2 METRIC TONNES')));
   assert.equal(getIssues(state).some(issue => issue.kind === 'conflict' && ['grossWeight', 'grossWeightUnit'].includes(issue.field ?? '')), false);
 });

@@ -36,11 +36,14 @@ export type DeclarationValue =
   | { kind: 'tax_amount_rows'; rows: { id: string; taxRowId: string; amount: string }[] }
   | { kind: 'blocked'; note: string };
 export type DeclarationReview = { actorId: string; actorName: string; at: string; reason: string };
+export type DeclarationComponentIssue = { component: string; rowIndex?: number; reason: 'conflict' | 'invalid' };
 export type DeclarationFieldEntry = {
   generatedBy?: 'shipment_extraction'; sourceFingerprint?: string; sourceCandidateIds?: string[];
   fieldId: string; goodsLineId?: string; applicability: DeclarationApplicability; basis: string;
   value: DeclarationValue; provenance: DeclarationProvenance[]; reason: string;
   review: DeclarationReview | null; stale: boolean; staleReason?: string;
+  /** Current generated cells can be usable while another component still blocks approval. */
+  componentIssues?: DeclarationComponentIssue[];
   updatedBy: string; updatedAt: string; codeVerification: 'unverified';
 };
 export type DeclarationDraft = { schemaVersion: 1; fields: DeclarationFieldEntry[] };

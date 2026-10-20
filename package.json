@@ -6,9 +6,9 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "local": "node scripts/local.mjs",
+    "local": "node --experimental-strip-types scripts/local.mjs",
     "install:ci": "node scripts/install-ci.mjs",
-    "dev": "node scripts/local.mjs",
+    "dev": "node --experimental-strip-types scripts/local.mjs",
     "build": "node scripts/run-framework.mjs build",
     "start": "node --import ./scripts/runtime-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
@@ -32,6 +32,7 @@
     "postal-mime": "^2.5.0",
     "react": "19.2.6",
     "react-dom": "19.2.6",
+    "sharp": "0.35.4",
     "zod": "^3.25.76"
   },
   "devDependencies": {

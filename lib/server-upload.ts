@@ -170,12 +170,12 @@ export async function upload(request: Request): Promise<Response> {
       document.aiStatus = aiConfigured ? 'partial' : 'unavailable';
       if (aiConfigured) document.aiError = 'Page images are ready to be processed after upload.';
     }
-    await enrichIntakeWithKimi(documents.filter(document => !isVisualDocument(document) && document.extractionStatus === 'pending_ai' && !document.referenceOnly && !context.state.documents.some(existing => existing.sha256 === document.sha256)), { apiKey: env.MOONSHOT_API_KEY, model: env.MOONSHOT_MODEL }, {
+    if (env.AICD_AUTH_MODE !== 'local') await enrichIntakeWithKimi(documents.filter(document => !isVisualDocument(document) && document.extractionStatus === 'pending_ai' && !document.referenceOnly && !context.state.documents.some(existing => existing.sha256 === document.sha256)), { apiKey: env.MOONSHOT_API_KEY, model: env.MOONSHOT_MODEL }, {
       allowRequest: () => consumeRateLimit(context.db, `kimi-extract:${context.state.id}`, 6, 60),
     });
     const result = await mutate(context, revision, documentId ? { type: 'replace_document', documentId, document: documents[0] } : { type: 'intake', documents, targetCaseId, sourceCollection, emails });
     committed = true;
-    if (emails.length && aiConfigured) {
+    if (emails.length && aiConfigured && env.AICD_AUTH_MODE !== 'local') {
       try { return json(await matchEmailsInContext(context, emails.map(email => email.id))); }
       catch (error) {
         // Original intake already committed. Matching failures must not discard it or

@@ -3,6 +3,7 @@ declare namespace Cloudflare {
     DB?: D1Database;
     BUCKET?: R2Bucket;
     AICD_AUTH_MODE?: string;
+    AICD_BACKGROUND_PROCESSING?: string;
     AICD_LOCAL_REQUEST_TOKEN?: string;
     SUPABASE_URL?: string;
     SUPABASE_ANON_KEY?: string;

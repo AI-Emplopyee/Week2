@@ -11,10 +11,12 @@ import { getDeclarationField } from "./declaration-catalog.ts";
 import { ECUS_FORM_FIELDS } from "./ecus-form.ts";
 import { canonicalExtractionField } from "./extraction.ts";
 import { normalizeDeclarationCodeCandidate } from "./country-codes.ts";
+import { explicitFormCode } from "./explicit-form-code.ts";
 import { SHIPMENT_TEXT_LIMITS } from "./source-text-limits.ts";
 import { deriveGuideCandidates, selectGuideCandidates, type GuideRuleDecision } from "./vnaccs-guide-rules.ts";
 import type {
   DeclarationFieldEntry,
+  DeclarationComponentIssue,
   DeclarationProvenance,
   DeclarationValue,
 } from "./declaration-types.ts";
@@ -80,6 +82,13 @@ export function normalizedShipmentValue(field: string, value: string): string {
     return `${whole.replace(/^0+(?=\d)/, "")}${decimal ? `.${decimal}` : ""}`;
   }
   const lowered = trimmed.toLocaleLowerCase("en");
+  const explicitCode = explicitFormCode(field, trimmed);
+  // Preserve historic comparison tokens for equivalent form spellings.
+  if (explicitCode?.value === 'KGM') return 'kg';
+  if (explicitCode?.value === 'PCE') return 'piece';
+  // KGS is also a mass-flow code. Only the separate source-aware gross-weight
+  // normalization may resolve a documented physical weight before comparison.
+  if (['unit', 'unit2', 'grossWeightUnit'].includes(field) && lowered === 'kgs') return 'kgs';
   if (["unit", "unit2", "grossWeightUnit", "packageUnit"].includes(field)) {
     const equivalentUnits: Record<string, string> = {
       kg: "kg",
@@ -403,6 +412,9 @@ type Part = {
   unknown?: boolean;
   reviewed?: boolean;
   ecusFieldKey?: string;
+  component?: string;
+  rowIndex?: number;
+  formCodeReason?: string;
 };
 type Proposal = {
   fieldId: string;
@@ -572,6 +584,14 @@ function proposalsFor(
       : source;
   const decimal = (source: Part, integer = false) =>
     checked(source, (value) => !!parseExactDecimal(value, { integer }));
+  const formCode = (source: Part): Part => {
+    if (!source.value || source.reviewed || source.unknown || source.fact.status !== 'agreed' ||
+      !isShipmentFactClear(state, source.fact.field, source.fact.candidates)) return source;
+    const code = explicitFormCode(source.fact.field, source.value);
+    return code && code.value !== source.value
+      ? { ...source, value: code.value, formCodeReason: code.reason }
+      : source;
+  };
   const add = (
     fieldId: string,
     components: Record<string, Part>,
@@ -581,7 +601,7 @@ function proposalsFor(
       Object.entries(components).map(([key, source]) => [
         key,
         checked(
-          source,
+          formCode(source),
           (value) =>
             value.length <=
             (key === "text"
@@ -601,7 +621,7 @@ function proposalsFor(
       fieldId,
       ...(goodsLineId ? { goodsLineId } : {}),
       value,
-      parts: Object.values(bounded),
+      parts: Object.entries(bounded).map(([component, source]) => ({ ...source, component })),
     });
   };
 
@@ -623,7 +643,7 @@ function proposalsFor(
           ? [{ id: `source-${transportField}`, reference: source.value }]
           : [],
       },
-      parts: [source],
+      parts: [{ ...source, component: 'reference', rowIndex: 0 }],
     });
   }
 
@@ -676,7 +696,7 @@ function proposalsFor(
     for (const field of ECUS_FORM_FIELDS) {
       if (field.readOnly || (field.tab === "goods") !== (scope === "goods")) continue;
       const sourceKey = field.sourceField ?? field.key;
-      let source = sourcePart(sourceKey);
+      let source = formCode(sourcePart(sourceKey));
       if (field.input === "date") source = checked(source, isIsoDate);
       if (field.input === "year") source = checked(source, (value) => /^\d{4}$/.test(value));
       if (["decimal", "integer"].includes(field.input))
@@ -687,7 +707,7 @@ function proposalsFor(
         source = checked(source, (value) => /^[A-Z]{3}$/i.test(value));
       source = checked(source, (value) => value.length <=
         (field.component === "text" ? DECLARATION_LIMITS.maxTextLength : DECLARATION_LIMITS.maxComponentLength));
-      source = { ...source, ecusFieldKey: field.key };
+      source = { ...source, ecusFieldKey: field.key, component: field.component, ...(field.rowIndex === undefined ? {} : { rowIndex: field.rowIndex }) };
       let proposal = proposals.find((item) => item.fieldId === field.fieldId && item.goodsLineId === goodsLineId);
       if (!proposal) {
         proposal = {
@@ -921,19 +941,16 @@ function contradictsSaved(
       JSON.stringify(savedRows) !== JSON.stringify(proposedRows)
     );
   }
-  return Object.entries(proposal.value).some(
-    ([key, value]) =>
-      key !== "kind" &&
-      value &&
-      normalizedShipmentValue(
-        ["amount", "count"].includes(key) ? "amount" : key,
-        value,
-      ) !==
-        normalizedShipmentValue(
-          ["amount", "count"].includes(key) ? "amount" : key,
-          String((entry.value as unknown as Record<string, string>)[key] ?? ""),
-        ),
-  );
+  return Object.entries(proposal.value).some(([key, value]) => {
+    if (key === 'kind' || !value) return false;
+    // Representation-only unit changes must not revoke a human's literal PCS
+    // or KG decision. Compare using the source field, never generic unitCode
+    // (which would also conflate package codes).
+    const sourceField = proposal.parts.find(part => part.component === key)?.fact.field;
+    const comparisonField = sourceField ?? (["amount", "count"].includes(key) ? "amount" : key);
+    return normalizedShipmentValue(comparisonField, value) !== normalizedShipmentValue(comparisonField,
+      String((entry.value as unknown as Record<string, string>)[key] ?? ''));
+  });
 }
 
 /** Retire obsolete source selections without creating a new human approval.
@@ -1040,8 +1057,15 @@ export function syncShipmentDeclaration(
     const collision = proposal.parts.some(
       (part) => part.fact.status === "conflict" || part.unknown,
     );
+    const componentIssues: DeclarationComponentIssue[] = [...new Map(proposal.parts.flatMap(part => {
+      if (!part.component || !(part.fact.status === 'conflict' || part.unknown)) return [];
+      const problem: DeclarationComponentIssue = { component: part.component, ...(part.rowIndex === undefined ? {} : { rowIndex: part.rowIndex }), reason: part.fact.status === 'conflict' ? 'conflict' : 'invalid' };
+      return [[JSON.stringify([problem.component, problem.rowIndex, problem.reason]), problem] as const];
+    })).values()];
+    const wholeEntryStale = collision && proposal.parts.some(part => (part.fact.status === 'conflict' || part.unknown) && !part.component);
     const missing = !valuePresent(proposal.value);
     const guideReasons = [...new Set(proposal.parts.flatMap((part) => [
+      ...(part.formCodeReason ? [part.formCodeReason] : []),
       ...(part.fact.rule ? [`${part.fact.rule.origin === "user_policy" ? "Source reconciliation policy" : `Supplied VNACCS guide ${part.fact.rule.section}`}: ${part.fact.rule.reasonEn}`] : []),
       ...part.fact.candidates.flatMap((candidate) => candidate.normalizations
         .filter((change) => change.reason.startsWith("vnaccs-guide:") || change.reason.startsWith("user-policy:") || change.reason.startsWith("party-typography:") || change.reason.startsWith("weight-unit:"))
@@ -1090,8 +1114,12 @@ export function syncShipmentDeclaration(
       reason:
         ["Shipment documents reconciled before declaration autofill; repeated facts were compared, not added.", ...guideReasons].join(" ").slice(0, 4000),
       review: null,
-      stale: collision,
-      ...(collision
+      // This is a fresh projection of current evidence. An unresolved component
+      // blocks approval through validation without invalidating its clear siblings.
+      // Keep the old whole-entry guard if an unmapped legacy part cannot be located.
+      stale: wholeEntryStale,
+      ...(componentIssues.length ? { componentIssues } : {}),
+      ...(wholeEntryStale
         ? {
             staleReason:
               "Shipment sources disagree or a value cannot be safely read; affected components remain empty.",
